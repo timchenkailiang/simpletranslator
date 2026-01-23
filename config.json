@@ -1,0 +1,78 @@
+[
+    {
+        "pdf_path": "source/PO 35306 - Jeffco.pdf",
+        "output_csv_path": "output/PO_35306_Jeffco.csv",
+        "start_anchor": "Antal Lev. part. Nr. Vort part Nr. Ønsket lev. Pris USD",
+        "columns": ["Antal", "Lev. part. Nr.", "Vort part Nr.", "Ønsket lev.", "Pris USD"],
+        "end_anchor": "FORTSÆTTES",
+        "example_row": {
+            "Antal": "6720STK",
+            "Vort part Nr.": "661001",
+            "Ønsket lev.": "1-12-25"
+        }
+    },
+    {
+        "pdf_path": "source/PO16665.pdf",
+        "output_csv_path": "output/PO16665.csv",
+        "start_anchor": "Qty",
+        "columns": ["Itemno.", "Description", "Master", "Inner", "Quantity", "Unit price", "Amount", "ETD", "Port"],
+        "end_anchor": "Subtotal",
+        "example_row": {
+            "Itemno.": "11011",
+            "Description": "Brand: HOME It®",
+            "Master": "2.240",
+            "Inner": "4",
+            "Quantity": "4.480",
+            "Unit price": "2,10",
+            "Amount": "9.408,00",
+            "ETD": "26-04-2026"
+        }
+    },
+    {
+        "pdf_path": "source/PO16689.pdf",
+        "output_csv_path": "output/PO16689.csv",
+        "start_anchor": "Qty",
+        "columns": ["Itemno.", "Description", "Master", "Inner", "Quantity", "Unit price", "Amount", "ETD", "Port"],
+        "end_anchor": "Subtotal",
+        "example_row": {
+            "Itemno.": "10232",
+            "Description": "Matt black shelf for acoustic panel 200 mm length.",
+            "Master": "0",
+            "Inner": "8",
+            "Quantity": "2.160",
+            "Unit price": "11,72",
+            "Amount": "25.315,20",
+            "ETD": "01-05-2026"
+        }
+    },
+    {
+        "pdf_path": "source/PO32357.pdf",
+        "output_csv_path": "output/PO32357.csv",
+        "start_anchor": "Quantity Your part No. Our part No. Del. date Price USD",
+        "columns": ["Quantity", "Your part No.", "Our part No.", "Del. date", "Price USD"],
+        "end_anchor": "CONTINUES",
+        "example_row": {
+            "Quantity": "2400",
+            "Your part No.": "60010 0107",
+            "Del. date": "1-06-26"
+        },
+        "post_processing": {
+            "Your part No.": ["remove_whitespace"]
+        }
+    },
+    {
+        "pdf_path": "source/51075 Globe 124983.pdf",
+        "output_csv_path": "output/51075_Globe.csv",
+        "start_anchor": "Item Denomination Quantity Price (USD) Amount Deliv. Dt.",
+        "columns": ["Item", "Denomination", "Quantity", "Price (USD)", "Amount", "Deliv. Dt."],
+        "end_anchor": "Commercial NET",
+        "example_row": {
+            "Item": "000460150000102",
+            "Denomination": "1460.150-BL ESCUADRA FIJA",
+            "Quantity": "1.800,00",
+            "Price (USD)": "0,524/UN",
+            "Amount": "943,20",
+            "Deliv. Dt.": "29/06/2026"
+        }
+    }
+]
