@@ -55,6 +55,14 @@ class SmartExtractor:
                      if "keep_numeric_only" not in post_processing[col]:
                         post_processing[col].append("keep_numeric_only")
                         print(f"Auto-detected pattern: enforcing numeric only for column '{col}'")
+                
+                # Check if value is strictly numeric digits (no separators like . or ,) implies user wants clean integers
+                if re.match(r'^\d+$', val):
+                    if col not in post_processing:
+                        post_processing[col] = []
+                    if "remove_numeric_separators" not in post_processing[col]:
+                        post_processing[col].append("remove_numeric_separators")
+                        print(f"Auto-detected pattern: removing numeric separators for column '{col}'")
 
         # We will learn the x-boundaries (cuts) from the example row
         column_cuts = None
@@ -87,6 +95,9 @@ class SmartExtractor:
                          # Explicitly handle .0 float string conversion artifact
                          # This happens if pandas inferred it as float before conversion to string
                          df[col] = df[col].apply(lambda x: x[:-2] if str(x).endswith('.0') else x)
+                    elif rule == "remove_numeric_separators":
+                        # User wants '180000' not '1.800,00' -> remove all dots and commas
+                        df[col] = df[col].astype(str).str.replace(r'[.,]', '', regex=True)
 
         # Save to CSV
         df.to_csv(output_csv, index=False)
