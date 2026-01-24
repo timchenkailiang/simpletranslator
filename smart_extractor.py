@@ -35,6 +35,8 @@ class SmartExtractor:
 
         # Learn pattern from example_row: 
         # If an example value has no whitespace, assume we should strip whitespace from extracted data for that column.
+        numeric_validation_cols = set()
+        
         for col in columns:
             val = str(example_row.get(col, "")).strip()
             if val:
@@ -47,13 +49,28 @@ class SmartExtractor:
                     if "remove_whitespace" not in post_processing[col]:
                         post_processing[col].append("remove_whitespace")
                         print(f"Auto-detected pattern: enforcing no whitespace for column '{col}'")
-                # Auto-detect numeric intent
-                if re.match(r'^\d+(\.\d+)?$', val):
-                    if col not in post_processing:
-                        post_processing[col] = []
-                    if "keep_numeric_only" not in post_processing[col]:
-                        post_processing[col].append("keep_numeric_only")
-                        print(f"Auto-detected pattern: enforcing numeric only for column '{col}'")
+                
+                # Check for numeric-like content (simple or formatted) for ROW VALIDATION purposes
+                # Matches simple integers/floats OR formatted numbers (e.g. 1.234,56)
+                if re.match(r'^[\d.,\-]+$', val) and any(c.isdigit() for c in val):
+                    numeric_validation_cols.add(col)
+                    
+                    # Auto-detect strictly SIMPLE numeric intent for CLEANING purposes
+                    # Only for "123" or "123.45". Not for "1.234,00" as stripping would break it.
+                    if re.match(r'^\d+(\.\d+)?$', val):
+                        if col not in post_processing:
+                            post_processing[col] = []
+                        if "keep_numeric_only" not in post_processing[col]:
+                            post_processing[col].append("keep_numeric_only")
+                            print(f"Auto-detected pattern: enforcing numeric only for column '{col}'")
+        
+        # Also include any columns that were manually configured as numeric
+        for col, rules in post_processing.items():
+            if "keep_numeric_only" in rules:
+                numeric_validation_cols.add(col)
+        
+        # Build indices for validation
+        numeric_columns_indices = [i for i, col in enumerate(columns) if col in numeric_validation_cols]
 
         # We will learn the x-boundaries (cuts) from the example row
         column_cuts = None
@@ -61,30 +78,29 @@ class SmartExtractor:
 
         with pdfplumber.open(pdf_path) as pdf:
             # First pass: try to find the example row to learn layout
-            if column_cuts is None:
-                column_cuts = self.learn_layout(pdf, start_anchor, end_anchor, columns, example_row)
-                if not column_cuts:
-                    raise ValueError(f"Could not learn layout for {pdf_path}. The 'example_row' provided in config does not match any row in the PDF. Please verify your config values match the PDF exactly.")
+            column_cuts = self.learn_layout(pdf, start_anchor, end_anchor, columns, example_row)
+            if not column_cuts:
+                raise ValueError(f"Could not learn layout for {pdf_path}. The 'example_row' provided in config does not match any row in the PDF. Please verify your config values match the PDF exactly.")
 
             # Second pass (or continuation): extract data using learned cuts
             for page in pdf.pages:
-                page_rows = self.extract_page_data(page, start_anchor, end_anchor, column_cuts, columns)
+                page_rows = self.extract_page_data(page, start_anchor, end_anchor, column_cuts, columns, numeric_columns_indices)
                 extracted_rows.extend(page_rows)
 
         # Create DataFrame
         df = pd.DataFrame(extracted_rows, columns=columns)
 
+        # Global cleanup for soft hyphens -> regular hyphens BEFORE any other processing
+        # This fixes issues where dates or IDs use soft hyphens as separators but have no other processing rules
+        for col in df.columns:
+            df[col] = df[col].astype(str).str.replace('\xad', '-', regex=False)
+
         # Apply post-processing
         for col, rules in post_processing.items():
             if col in df.columns:
-                # Global cleanup for soft hyphens -> regular hyphens BEFORE any other processing
-                # This fixes issues where dates or IDs use soft hyphens as separators (e.g. 01\xad05\xad2026 -> 01-05-2026)
-                df[col] = df[col].astype(str).str.replace('\xad', '-', regex=False)
-
                 for rule in rules:
                     if rule == "remove_whitespace":
                         # Also replace non-breaking spaces (\xa0) and other unicode spaces
-                        # Removed \xad from here because we handle it above by converting to hyphen
                         df[col] = df[col].astype(str).str.replace(r'[\s\u00A0\u200b\u202f]+', '', regex=True)
                     elif rule == "keep_numeric_only":
                         df[col] = df[col].astype(str).str.replace(r'[^\d.]', '', regex=True)
@@ -350,10 +366,6 @@ class SmartExtractor:
         MAX_EXPANSION = 50      # Don't expand more than 50 points regardless of gap size.
         MIN_EXPANSION = 5       # Always allow at least small wiggle room.
         
-        print(f"DEBUG: Calculating cuts for columns: {columns}")
-        for col, m in column_matches.items():
-            print(f"  Match {col}: {m['x0']:.2f}-{m['x1']:.2f}")
-
         final_zones = []
         
         # Ensure we have matches for all columns
@@ -582,6 +594,15 @@ class SmartExtractor:
                                          # If the next column is missing, we should just stop at the obstacle.
                                          # If the next column is present, we should stop before it.
                                          pass
+                                     
+                                     # Ensure x_end is set even if we pass (fallback)
+                                     if 'x_end' not in locals():
+                                          x_end = max(curr_match['x1'], obstacle_x0 - MIN_EXPANSION)
+                             else:
+                                 # Current matches are missing (is_present=False), but we found an obstacle in the gap.
+                                 # This obstacle likely belongs to one of the upcoming missing columns.
+                                 # We should end the current (empty) column before the obstacle.
+                                 x_end = max(x_start + MIN_EXPANSION, obstacle_x0 - MIN_EXPANSION)
                          else:
                              # Count missing cols immediately following
                              num_missing = 0
@@ -640,7 +661,7 @@ class SmartExtractor:
             
         return final_zones
 
-    def extract_page_data(self, page, start_anchor, end_anchor, column_cuts, columns):
+    def extract_page_data(self, page, start_anchor, end_anchor, column_cuts, columns, numeric_columns_indices=None):
         """
         Extracts data from a single page using the learned column cuts.
         Only processes text between start_anchor and end_anchor.
@@ -710,12 +731,6 @@ class SmartExtractor:
             if line_top > start_y and line_bottom < end_y:
                 row_data = self.process_line_to_row(line, column_cuts, columns)
                 
-                # DEBUG: Print row data for the problematic row
-                if "6720" in "".join(row_data) and "661001" in "".join(row_data):
-                     print(f"DEBUG ROW: {row_data}")
-                     print(f"DEBUG CUTS: {column_cuts}")
-                     print(f"DEBUG LINE WORDS: {[ (w['text'], w['x0'], w['x1']) for w in line]}")
-
                 # Filter invalid rows
                 if row_data[0] == columns[0]:
                     continue
@@ -733,17 +748,10 @@ class SmartExtractor:
                 # 2. Or at least values in > 50% of the columns? 
                 # 3. Or specific column patterns.
                 
-                # Heuristic: If "Quantity" or "Amount" or "Pris" or "Unit price" is in usage, check if it's numeric.
-                # Find indices of likely numeric columns
-                numeric_indices = []
-                for idx, col_name in enumerate(columns):
-                    lower_col = col_name.lower()
-                    if "quantity" in lower_col or "amount" in lower_col or "price" in lower_col or "antal" in lower_col or "pris" in lower_col:
-                        numeric_indices.append(idx)
-                
-                if numeric_indices:
+                # Use the provided numeric_columns_indices which are derived from config/layout learning
+                if numeric_columns_indices:
                     has_numeric = False
-                    for ni in numeric_indices:
+                    for ni in numeric_columns_indices:
                         val = row_data[ni].strip()
                         # Cleanup common delimiters for check
                         # In 35306, "Antal" is "3600 STK". "STK" is not numeric.
@@ -751,7 +759,7 @@ class SmartExtractor:
                         # Or split val by space and check first part?
                         
                         # Simplified check: Check if the value starts with a digit
-                        if val and val[0].isdigit():
+                        if val and (val[0].isdigit() or (len(val) > 1 and val[0] == '-' and val[1].isdigit())):
                              has_numeric = True
                              break
                              
