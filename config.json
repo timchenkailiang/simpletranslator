@@ -6,7 +6,7 @@
         "columns": ["Antal", "Lev. part. Nr.", "Vort part Nr.", "Ønsket lev.", "Pris USD"],
         "end_anchor": "FORTSÆTTES",
         "example_row": {
-            "Antal": "6720STK",
+            "Antal": "6720",
             "Vort part Nr.": "661001",
             "Ønsket lev.": "1-12-25"
         }
@@ -15,17 +15,16 @@
         "pdf_path": "source/PO16665.pdf",
         "output_csv_path": "output/PO16665.csv",
         "start_anchor": "Qty",
-        "columns": ["Itemno.", "Description", "Master", "Inner", "Quantity", "Unit price", "Amount", "ETD", "Port"],
-        "end_anchor": "Subtotal",
+        "columns": ["Itemno.", "Description", "Master", "Inner", "Quantity", "Unit price", "Amount", "ETD Port"],
+        "end_anchor": "IMPORTANT / SHIPPING DETAILS",
         "example_row": {
             "Itemno.": "11011",
-            "Description": "Brand: HOME It®",
             "Master": "2.240",
             "Inner": "4",
             "Quantity": "4.480",
             "Unit price": "2,10",
             "Amount": "9.408,00",
-            "ETD": "26-04-2026"
+            "ETD Port": "26-04-2026"
         }
     },
     {
@@ -33,7 +32,7 @@
         "output_csv_path": "output/PO16689.csv",
         "start_anchor": "Qty",
         "columns": ["Itemno.", "Description", "Master", "Inner", "Quantity", "Unit price", "Amount", "ETD", "Port"],
-        "end_anchor": "Subtotal",
+        "end_anchor": "IMPORTANT / SHIPPING DETAILS",
         "example_row": {
             "Itemno.": "10232",
             "Description": "Matt black shelf for acoustic panel 200 mm length.",
@@ -53,7 +52,7 @@
         "end_anchor": "CONTINUES",
         "example_row": {
             "Quantity": "2400",
-            "Your part No.": "60010 0107",
+            "Our part No.": "600100107",
             "Del. date": "1-06-26"
         },
         "post_processing": {
@@ -69,9 +68,9 @@
         "example_row": {
             "Item": "000460150000102",
             "Denomination": "1460.150-BL ESCUADRA FIJA",
-            "Quantity": "1.800,00",
-            "Price (USD)": "0,524/UN",
-            "Amount": "943,20",
+            "Quantity": "1.800,00 UN",
+            "Price (USD)": "0.524/UN",
+            "Amount": "94320",
             "Deliv. Dt.": "29/06/2026"
         }
     }

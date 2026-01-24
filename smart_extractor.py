@@ -39,30 +39,21 @@ class SmartExtractor:
             val = str(example_row.get(col, "")).strip()
             if val:
                 # If there is a value and it contains NO whitespace...
-                if not re.search(r'\s', val):
+                # Check for various forms of whitespace: standard space, non-breaking space, etc.
+                if not re.search(r'[\s\u00A0]', val):
                     # ...add automatic whitespace removal rule
                     if col not in post_processing:
                         post_processing[col] = []
                     if "remove_whitespace" not in post_processing[col]:
                         post_processing[col].append("remove_whitespace")
                         print(f"Auto-detected pattern: enforcing no whitespace for column '{col}'")
-                
-                # Check if value is numeric (allowing for common numeric chars like .-), but extracted data might contain text like 'STK'
-                # If example is "3600" (numeric), we should probably strip non-numeric characters from the result if it contains letters like 'STK'
-                if re.match(r'^[\d.,]+$', val):
-                     if col not in post_processing:
-                        post_processing[col] = []
-                     if "keep_numeric_only" not in post_processing[col]:
-                        post_processing[col].append("keep_numeric_only")
-                        print(f"Auto-detected pattern: enforcing numeric only for column '{col}'")
-                
-                # Check if value is strictly numeric digits (no separators like . or ,) implies user wants clean integers
-                if re.match(r'^\d+$', val):
+                # Auto-detect numeric intent
+                if re.match(r'^\d+(\.\d+)?$', val):
                     if col not in post_processing:
                         post_processing[col] = []
-                    if "remove_numeric_separators" not in post_processing[col]:
-                        post_processing[col].append("remove_numeric_separators")
-                        print(f"Auto-detected pattern: removing numeric separators for column '{col}'")
+                    if "keep_numeric_only" not in post_processing[col]:
+                        post_processing[col].append("keep_numeric_only")
+                        print(f"Auto-detected pattern: enforcing numeric only for column '{col}'")
 
         # We will learn the x-boundaries (cuts) from the example row
         column_cuts = None
@@ -86,18 +77,17 @@ class SmartExtractor:
         # Apply post-processing
         for col, rules in post_processing.items():
             if col in df.columns:
+                # Global cleanup for soft hyphens -> regular hyphens BEFORE any other processing
+                # This fixes issues where dates or IDs use soft hyphens as separators (e.g. 01\xad05\xad2026 -> 01-05-2026)
+                df[col] = df[col].astype(str).str.replace('\xad', '-', regex=False)
+
                 for rule in rules:
                     if rule == "remove_whitespace":
-                        df[col] = df[col].astype(str).str.replace(r'\s+', '', regex=True)
+                        # Also replace non-breaking spaces (\xa0) and other unicode spaces
+                        # Removed \xad from here because we handle it above by converting to hyphen
+                        df[col] = df[col].astype(str).str.replace(r'[\s\u00A0\u200b\u202f]+', '', regex=True)
                     elif rule == "keep_numeric_only":
-                         # Remove anything that is not a digit, comma, or period
-                         df[col] = df[col].astype(str).str.replace(r'[^\d.,]', '', regex=True)
-                         # Explicitly handle .0 float string conversion artifact
-                         # This happens if pandas inferred it as float before conversion to string
-                         df[col] = df[col].apply(lambda x: x[:-2] if str(x).endswith('.0') else x)
-                    elif rule == "remove_numeric_separators":
-                        # User wants '180000' not '1.800,00' -> remove all dots and commas
-                        df[col] = df[col].astype(str).str.replace(r'[.,]', '', regex=True)
+                        df[col] = df[col].astype(str).str.replace(r'[^\d.]', '', regex=True)
 
         # Save to CSV
         df.to_csv(output_csv, index=False)
@@ -287,11 +277,11 @@ class SmartExtractor:
                         
                         if match_count == len(target_cols):
                             # Pass the current line as a guide for detecting obstacles
-                            return self.calculate_cuts(best_matches, columns, page.width, guide_line=line)
+                            return self.calculate_cuts(best_matches, columns, page.width, guide_line=line, example_row=example_row)
  
         # DISABLED: Partial matching logic to enforce strict configuration correctness.
         # if best_match_count >= max(2, len(target_cols) / 2): 
-        #     return self.calculate_cuts(best_matches, columns, pdf.pages[0].width)
+        #     return self.calculate_cuts(best_matches, columns, pdf.pages[0].width, example_row=example_row)
             
         return None
 
@@ -351,7 +341,7 @@ class SmartExtractor:
         
         return best_chain
 
-    def calculate_cuts(self, column_matches, columns, page_width, guide_line=None):
+    def calculate_cuts(self, column_matches, columns, page_width, guide_line=None, example_row=None):
         """
         Calculates vertical cuts (x-coordinates) separating columns.
         Uses a dynamic expansion strategy based on the available gap between columns.
@@ -360,6 +350,10 @@ class SmartExtractor:
         MAX_EXPANSION = 50      # Don't expand more than 50 points regardless of gap size.
         MIN_EXPANSION = 5       # Always allow at least small wiggle room.
         
+        print(f"DEBUG: Calculating cuts for columns: {columns}")
+        for col, m in column_matches.items():
+            print(f"  Match {col}: {m['x0']:.2f}-{m['x1']:.2f}")
+
         final_zones = []
         
         # Ensure we have matches for all columns
@@ -484,41 +478,74 @@ class SmartExtractor:
                                          is_first_alpha = first_char.isalpha()
                                          
                                          if is_last_digit and is_first_alpha:
-                                             should_merge = True # "3600" "STK"
+                                             # "3600" "STK"
+                                             # Always merge suffixes (units/text) into the numeric column.
+                                             # We rely on 'keep_numeric_only' post-processing to strip them if needed.
+                                             # This prevents the suffix from spilling into the next column.
+                                             should_merge = True
+                                             
                                          elif is_last_alpha and is_first_alpha:
                                              should_merge = True # "Description" "Text"
-                                         # Default to False for Digit->Digit or Alpha->Digit
                                      else:
                                          # Fallback if we can't identify words (shouldn't happen with guide_line)
                                          should_merge = False
 
                                      if should_merge:
+                                         # Initialize last_word_in_cluster correctly
+                                         # We need 'last_word_text' but as a word object with x-coords
+                                         last_word_in_cluster = None
+                                         if guide_line:
+                                             for w in guide_line:
+                                                 if abs(w['x1'] - curr_match['x1']) < 5:
+                                                     last_word_in_cluster = w
+                                                     break
+                                         if not last_word_in_cluster:
+                                              # Fallback mock
+                                              last_word_in_cluster = {'text': str(example_row.get(col, "")) if example_row else "0", 'x1': curr_match['x1']}
+
                                          # Include it!
-                                     
-                                         # Find cluster end
                                          cluster_end = obstacle_x0
+                                         
+                                         # Track the last word added to the cluster to check for logical breaks
+                                         
                                          if guide_line:
                                              for w in guide_line:
                                                  if w['x0'] >= obstacle_x0:
-                                                    if w['x0'] - cluster_end < 15:
+                                                    dist_seg = w['x0'] - cluster_end
+                                                    # Only consider words that are very close (suffix/unit merging)
+                                                    if dist_seg < 15:
+                                                        # Check transition before merging
+                                                        # We want to merge "3600" + "STK" (Digit -> Alpha)
+                                                        # But STOP at "STK" + "661001" (Alpha -> Digit)
+                                                        # Also STOP at "100" + "200" (Digit -> Digit)
+                                                        
+                                                        stop_merge = False
+                                                        if last_word_in_cluster:
+                                                            prev_text = last_word_in_cluster['text']
+                                                            curr_text = w['text']
+                                                            
+                                                            is_prev_alpha = prev_text[-1].isalpha()
+                                                            is_prev_digit = prev_text[-1].isdigit()
+                                                            is_curr_alpha = curr_text[0].isalpha()
+                                                            is_curr_digit = curr_text[0].isdigit()
+
+                                                            if is_prev_alpha and is_curr_digit:
+                                                                # Alpha -> Digit: "STK" -> "661001". Likely new column.
+                                                                stop_merge = True
+                                                            elif is_prev_digit and is_curr_digit:
+                                                                # Digit -> Digit: "10" -> "20". Likely new column.
+                                                                stop_merge = True
+                                                        
+                                                        if stop_merge:
+                                                            break
+                                                        
                                                         cluster_end = w['x1']
-                                                        # Also update last_word_text for chain checking?
-                                                        # Simplification: just take the cluster.
+                                                        last_word_in_cluster = w
                                                     else:
                                                         break
                                          
-                                         # Recalculate end
-                                         # But wait, what if we merged "STK", and NOW we are facing "661001"?
-                                         # We really should loop this check.
-                                         # But for now, let's just extend to cluster_end and assume the NEXT split handles the break.
-                                         # The logic below (clamp to next obstacle) handles the subsequent break.
-                                         
-                                         # Check distance to NEXT obstacle after the merged cluster
-                                         # ... (reuse existing logic for next obstacle clamping) ...
-                                         
                                          next_obstacle_x0 = valid_anchor_x0
                                          next_obstacle_found = False
-                                         
                                          if guide_line:
                                              for w in guide_line:
                                                  w_center = (w['x0'] + w['x1']) / 2
@@ -548,12 +575,13 @@ class SmartExtractor:
                                      else:
                                          # heuristic says DO NOT MERGE
                                          x_end = max(curr_match['x1'], obstacle_x0 - MIN_EXPANSION)
-                                 else:
-                                     # Obstacle is clearly separate. Stop before it.
-                                     x_end = max(curr_match['x1'], obstacle_x0 - MIN_EXPANSION)
-                             else:
-                                 # Current missing. Bound to obstacle.
-                                 x_end = max(x_start, obstacle_x0 - MIN_EXPANSION)
+
+                                         # SPECIAL CASE: If we decided NOT to merge "STK", but it is physically very close (suffix),
+                                         # we should still ensure it doesn't get misclassified into the next column.
+                                         # This is tricky because the next column might be missing too.
+                                         # If the next column is missing, we should just stop at the obstacle.
+                                         # If the next column is present, we should stop before it.
+                                         pass
                          else:
                              # Count missing cols immediately following
                              num_missing = 0
@@ -627,10 +655,24 @@ class SmartExtractor:
         end_y = page.height
 
         # Find exact Y position of start anchor
+        # NOTE: If start_anchor is NOT found on this page, we should assume it started on a previous page
+        # EXCEPT for the very first page of content where headers usually are.
+        # But wait, if start_anchor is table header, and table spans multiple pages, 
+        # subsequent pages might NOT have the header repeated, OR they might.
+        # If they don't have the header, we should start from top (start_y=0).
+        
+        # Correct Logic for Multi-page Tables:
+        # 1. Look for start_anchor. If found, start extracting BELOW it.
+        # 2. If NOT found, assume the table continues from previous page -> Start from TOP (0).
+        #    (Unless we want to be strict and say table must have header on every page?)
+        #    Most POs don't repeat full header on every page (or they do). 
+        #    If they do, found_start will be True.
+        #    If they don't, we should default to extracting from top IF we are in "table mode".
+        
         lines = self.get_lines_on_page(page)
         normalized_start = re.sub(r'\s+', '', start_anchor)
         
-        found_start = False
+        found_start_on_this_page = False
         
         for line in lines:
             line_text = self.line_to_text(line)
@@ -638,11 +680,13 @@ class SmartExtractor:
             
             if normalized_start in normalized_line:
                 start_y = max(w['bottom'] for w in line)
-                found_start = True
+                found_start_on_this_page = True
                 break
         
-        if not found_start:
-            return []
+        # If start anchor not found, default to 0 (top of page) 
+        # assuming the table flows from previous page.
+        if not found_start_on_this_page:
+            start_y = 0
 
         # Find end Y
         if end_anchor:
@@ -666,6 +710,12 @@ class SmartExtractor:
             if line_top > start_y and line_bottom < end_y:
                 row_data = self.process_line_to_row(line, column_cuts, columns)
                 
+                # DEBUG: Print row data for the problematic row
+                if "6720" in "".join(row_data) and "661001" in "".join(row_data):
+                     print(f"DEBUG ROW: {row_data}")
+                     print(f"DEBUG CUTS: {column_cuts}")
+                     print(f"DEBUG LINE WORDS: {[ (w['text'], w['x0'], w['x1']) for w in line]}")
+
                 # Filter invalid rows
                 if row_data[0] == columns[0]:
                     continue
@@ -676,6 +726,38 @@ class SmartExtractor:
                     
                 if not row_data[0].strip():
                      continue
+
+                # NEW FILTER: Ignore rows that don't look like data records
+                # Specifically for these POs, real rows usually have:
+                # 1. A numeric value in the 'Quantity' or 'Amount' columns (if they exist)
+                # 2. Or at least values in > 50% of the columns? 
+                # 3. Or specific column patterns.
+                
+                # Heuristic: If "Quantity" or "Amount" or "Pris" or "Unit price" is in usage, check if it's numeric.
+                # Find indices of likely numeric columns
+                numeric_indices = []
+                for idx, col_name in enumerate(columns):
+                    lower_col = col_name.lower()
+                    if "quantity" in lower_col or "amount" in lower_col or "price" in lower_col or "antal" in lower_col or "pris" in lower_col:
+                        numeric_indices.append(idx)
+                
+                if numeric_indices:
+                    has_numeric = False
+                    for ni in numeric_indices:
+                        val = row_data[ni].strip()
+                        # Cleanup common delimiters for check
+                        # In 35306, "Antal" is "3600 STK". "STK" is not numeric.
+                        # So we must allow alphanumeric if it Starts with Digit?
+                        # Or split val by space and check first part?
+                        
+                        # Simplified check: Check if the value starts with a digit
+                        if val and val[0].isdigit():
+                             has_numeric = True
+                             break
+                             
+                    if not has_numeric:
+                        # Skip this row, it's likely a description line like "Brand...:Home>it" or "EAN..."
+                        continue
                      
                 data.append(row_data)
                     
