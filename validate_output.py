@@ -2,15 +2,20 @@ import os
 import pandas as pd
 import glob
 import math
+import sys
 
-def validate_csvs(output_dir):
-    # Search recursively for csv files in output_dir and its subdirectories
-    csv_files = glob.glob(os.path.join(output_dir, "**/*.csv"), recursive=True)
-    
-    print(f"Found {len(csv_files)} CSV files in {output_dir} (recursive)")
+def validate_csvs(target_path):
+    # Check if target is a file or directory
+    if os.path.isfile(target_path):
+        csv_files = [target_path]
+        print(f"Validating single file: {target_path}")
+    else:
+        # Search recursively for csv files in output_dir and its subdirectories
+        csv_files = glob.glob(os.path.join(target_path, "**/*.csv"), recursive=True)
+        print(f"Found {len(csv_files)} CSV files in {target_path} (recursive)")
     
     for file_path in csv_files:
-        print(f"\nValidating {os.path.relpath(file_path, output_dir)}...")
+        print(f"\nValidating {os.path.relpath(file_path, target_path)}...")
         try:
             # Read as string to preserve formatting like "1.120" vs "1.12"
             df = pd.read_csv(file_path, dtype=str)
@@ -111,6 +116,12 @@ def validate_csvs(output_dir):
         if not issues_found:
             print("  No suspicious characters found.")
 
+# Standard interface for the GUI
+def validate_file(file_path):
+    # Wrapper around the existing logic
+    # Since validate_csvs handles a single file path gracefully now, we can just call it
+    validate_csvs(file_path)
+
 def parse_number(value_str):
     """
     Parses a string into a float, handling common European/US inconsistencies.
@@ -194,4 +205,8 @@ def check_math(row, qty_col, price_col, amount_col):
     return True, 0, 0
 
 if __name__ == "__main__":
-    validate_csvs("output")
+    target = "output"
+    if len(sys.argv) > 1:
+        target = sys.argv[1]
+    
+    validate_csvs(target)

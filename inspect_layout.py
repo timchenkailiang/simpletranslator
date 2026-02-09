@@ -71,29 +71,33 @@ def inspect_globe(pdf_path):
         page = pdf.pages[0]
         words = page.extract_words()
         
-        # Look for headers
-        # Based on raw text dump: "Artículo Denominación Cantidad Precio (USD) Importe F. Entrega"
-        headers_found = [w for w in words if w['text'] in ["Artículo", "Denominación", "Cantidad", "Precio", "Importe", "Entrega"]]
+        # Look for the header line
+        # Globe headers: Item, Denomination, Quantity, Price, (USD), Amount, Deliv. Dt.
+        headers = [w for w in words if w['text'] in ["Price", "USD", "(USD)", "Quantity", "Amount", "Deliv.", "Dt."]]
         print("--- HEADERS ---")
-        for h in headers_found:
-             print(f"Text: {h['text']}, x0: {h['x0']}, top: {h['top']}")
-        
-        # Look for sample data row based on known item number format (long digits)
-        # e.g. 000461200000102
-        long_item = [w for w in words if len(w['text']) > 12 and w['text'].isdigit()]
-        
-        print("\n--- DATA SAMPLES ---")
-        if long_item:
-            for item in long_item[:3]:
-                # Get line
-                line_words = [w for w in words if abs(w['top'] - item['top']) < 3]
-                line_words.sort(key=lambda x: x['x0'])
-                print(f"Row at top {item['top']}: " + " | ".join([f"{w['text']} ({int(w['x0'])})" for w in line_words]))
-        else:
-            print("No long item numbers found. checking regex...")
-            # Fallback
+        headers.sort(key=lambda x: x['x0'])
+        for h in headers:
+            print(f"Text: {h['text']}, x0: {h['x0']}, top: {h['top']}")
+
+        print("\n--- ALL WORDS AROUND HEADER ---")
+        # Find likely header row
+        header_y = 0
+        if headers:
+            header_y = headers[0]['top']
             
+        header_words = [w for w in words if abs(w['top'] - header_y) < 10]
+        header_words.sort(key=lambda x: x['x0'])
+        for w in header_words:
+             print(f"Word: {w['text']}, x0: {w['x0']}, top: {w['top']}")
+
+
 if __name__ == "__main__":
-    # inspect_layout("source/Series_16/PO16431.pdf")
-    inspect_jeffco("source/Jeffco/35369.pdf")
-    # inspect_globe("source/Globe/51075 Globe 124533.pdf")
+    import sys
+    if len(sys.argv) > 1:
+        path = sys.argv[1]
+        if "Globe" in path:
+            inspect_globe(path)
+        else:
+            inspect_jeffco(path)
+    else:
+        inspect_jeffco("source/Jeffco/35369.pdf")

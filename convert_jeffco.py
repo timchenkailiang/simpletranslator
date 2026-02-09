@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import os
 import glob
+import sys
 from datetime import datetime
 
 def clean_text(text):
@@ -83,7 +84,10 @@ def extract_jeffco_data(pdf_path):
                     etd_word = ""
                     price_word = ""
                     
-                    for w in line_words:
+                    # Filter out STK if it appears in quantity area
+                    filtered_words = [w for w in line_words if w['text'] != "STK"]
+                    
+                    for w in filtered_words:
                         x = w['x0']
                         text = w['text']
                         
@@ -155,7 +159,41 @@ def extract_jeffco_data(pdf_path):
 
     return data_rows
 
+def process_file(input_path, output_path=None):
+    if not output_path:
+        # Default to output/Jeffco if no output path specified
+        base_name = os.path.basename(input_path).replace(".pdf", ".csv")
+        output_dir = os.path.join("output", "Jeffco")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        output_path = os.path.join(output_dir, base_name)
+
+    print(f"Processing Jeffco file: {input_path}")
+    try:
+        data = extract_jeffco_data(input_path)
+        if data:
+            df = pd.DataFrame(data)
+            cols = ["Our Part No", "Quantity", "Your Part No", "Price USD", "Del. date", "Description"]
+            for c in cols:
+                if c not in df.columns: df[c] = ""
+            df = df[cols]
+            df.to_csv(output_path, index=False)
+            print(f"Saved {output_path}")
+            return True
+        else:
+            print("No data extracted.")
+            return False
+    except Exception as e:
+        print(f"Error: {e}")
+        raise e
+
 def main():
+    # Check for CLI arguments
+    if len(sys.argv) > 1:
+        process_file(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
+        return
+
+    # Default Batch Mode
     source_dir = "source/Jeffco"
     output_dir = "output/Jeffco"
     
@@ -175,8 +213,8 @@ def main():
                 df = pd.DataFrame(data)
                 
                 # Desired output columns
-                # We want: Quantity, Your Part No, Our Part No, Price USD, Del. date, Description
-                cols = ["Quantity", "Your Part No", "Our Part No", "Price USD", "Del. date", "Description"]
+                # We want: Our Part No, Quantity, Your Part No, Price USD, Del. date, Description
+                cols = ["Our Part No", "Quantity", "Your Part No", "Price USD", "Del. date", "Description"]
                 
                 # Ensure they exist
                 for c in cols:
