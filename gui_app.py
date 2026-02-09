@@ -7,6 +7,17 @@ import sys
 import threading
 import shutil
 
+
+def _get_app_dir() -> str:
+    """Return the directory the app should treat as its home.
+
+    - If frozen (PyInstaller), use the executable directory.
+    - Otherwise, use the directory containing this script.
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
 # NEW: Custom Widget for "Web-Style" Searchable Dropdown
 class SearchableDropdown(ttk.Frame):
     def __init__(self, master, textvariable, items, command=None, *args, **kwargs):
@@ -71,6 +82,12 @@ class SearchableDropdown(ttk.Frame):
         self.items = new_items
         self.filtered_items = new_items
 
+        # If popup is open, refresh visible list immediately
+        if self.popup and self.listbox:
+            self.listbox.delete(0, tk.END)
+            for item in self.filtered_items:
+                self.listbox.insert(tk.END, item)
+
     def toggle_full_list(self):
         if self.popup:
             self.destroy_popup()
@@ -111,6 +128,13 @@ class SearchableDropdown(ttk.Frame):
             y = self.entry.winfo_rooty() + self.entry.winfo_height()
             w = self.entry.winfo_width() + self.btn.winfo_width()
             self.popup.geometry(f"{w}x150+{x}+{y}")
+
+            # On Windows, focus can briefly shift when the Toplevel opens;
+            # lifting helps ensure the popup is visible.
+            try:
+                self.popup.lift()
+            except Exception:
+                pass
             
             # Listbox inside
             frame = ttk.Frame(self.popup, relief="solid", borderwidth=1)
@@ -142,6 +166,17 @@ class SearchableDropdown(ttk.Frame):
 
     def check_focus(self):
         if self.popup:
+            # If mouse is currently over the dropdown or popup, don't close.
+            try:
+                px, py = self.winfo_pointerxy()
+                hover_widget = self.winfo_containing(px, py)
+                if hover_widget:
+                    hover_name = str(hover_widget)
+                    if hover_name.startswith(str(self)) or hover_name.startswith(str(self.popup)):
+                        return
+            except Exception:
+                pass
+
             focused = self.winfo_toplevel().focus_get()
             
             # Keep open if focus is on entry, button/arrow, or listbox
@@ -206,6 +241,11 @@ class ConverterApp:
         # Variables
         self.selected_file = tk.StringVar() # PDF Input
         self.status_var = tk.StringVar(value="Ready")
+
+        # App paths
+        self.app_dir = _get_app_dir()
+        self.tools_path = os.path.join(self.app_dir, 'tools.json')
+        self.profiles_path = os.path.join(self.app_dir, 'merge_profiles.json')
         
         # Configuration Variables
         self.profile_var = tk.StringVar()
@@ -221,6 +261,9 @@ class ConverterApp:
         # UI Setup
         self.create_menu()
         self.create_widgets()
+
+        # Startup status (helps confirm tools/profiles were loaded)
+        self.status_var.set(f"Loaded {len(self.tools)} tools, {len(self.profiles)} profiles")
         
     def create_menu(self):
         menubar = tk.Menu(self.root)
@@ -232,23 +275,30 @@ class ConverterApp:
 
     def load_tools(self):
         try:
-            with open('tools.json', 'r') as f:
+            path = self.tools_path
+            if not os.path.exists(path) and os.path.exists('tools.json'):
+                path = 'tools.json'
+            with open(path, 'r', encoding='utf-8') as f:
                 self.tools = json.load(f)
         except Exception as e:
             # First run might not have tools, don't popup error yet, just log
             print(f"Could not load tools.json: {e}")
             self.tools = []
+            self.status_var.set("Could not load tools.json (check app folder)")
 
     def load_profiles(self):
         try:
-            with open('merge_profiles.json', 'r') as f:
+            path = self.profiles_path
+            if not os.path.exists(path) and os.path.exists('merge_profiles.json'):
+                path = 'merge_profiles.json'
+            with open(path, 'r', encoding='utf-8') as f:
                 self.profiles = json.load(f)
         except Exception:
             self.profiles = []
 
     def save_profiles_to_disk(self):
         try:
-            with open('merge_profiles.json', 'w') as f:
+            with open(self.profiles_path, 'w', encoding='utf-8') as f:
                 json.dump(self.profiles, f, indent=4)
         except Exception as e:
             messagebox.showerror("Error", f"Could not save profiles: {e}")
@@ -526,26 +576,26 @@ class ConverterApp:
             
             # Logic to verify script exists or copy it
             script_filename = os.path.basename(source_script)
-            target_script = os.path.join(os.getcwd(), script_filename)
+            target_script = os.path.join(self.app_dir, script_filename)
             
             try:
                 # Only copy if it's a new path and file exists (if editing, might be same)
                 if os.path.exists(source_script) and os.path.abspath(source_script) != os.path.abspath(target_script):
                     shutil.copy2(source_script, target_script)
                 elif not os.path.exists(target_script) and not os.path.exists(source_script):
-                     # If editing and file wasn't changed but exists locally
-                     if not os.path.exists(os.path.join(os.getcwd(), source_script)):
+                    # If editing and file wasn't changed but exists locally
+                    if not os.path.exists(os.path.join(self.app_dir, source_script)):
                         messagebox.showerror("Error", f"Script file not found: {source_script}")
                         return
-                     script_filename = source_script # Keep existing name if relative
+                    script_filename = source_script # Keep existing name if relative
 
                 # Handle validator copy
                 if validator and validator != "validate_output.py":
-                     val_filename = os.path.basename(validator)
-                     target_val = os.path.join(os.getcwd(), val_filename)
-                     if os.path.exists(validator) and os.path.abspath(validator) != os.path.abspath(target_val):
-                         shutil.copy2(validator, target_val)
-                     validator = val_filename
+                    val_filename = os.path.basename(validator)
+                    target_val = os.path.join(self.app_dir, val_filename)
+                    if os.path.exists(validator) and os.path.abspath(validator) != os.path.abspath(target_val):
+                        shutil.copy2(validator, target_val)
+                    validator = val_filename
                 
                 new_entry = {
                     "name": name,
@@ -565,7 +615,7 @@ class ConverterApp:
                             self.tools[i] = new_entry
                             break
                             
-                with open('tools.json', 'w') as f:
+                with open(self.tools_path, 'w', encoding='utf-8') as f:
                     json.dump(self.tools, f, indent=4)
                 
                 self.refresh_combo_list()
@@ -583,7 +633,7 @@ class ConverterApp:
             def delete_tool():
                 if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete '{tool_data['name']}'?"):
                     self.tools = [t for t in self.tools if t['name'] != tool_data['name']]
-                    with open('tools.json', 'w') as f:
+                    with open(self.tools_path, 'w', encoding='utf-8') as f:
                         json.dump(self.tools, f, indent=4)
                     self.refresh_combo_list()
                     top.destroy()
@@ -608,13 +658,19 @@ class ConverterApp:
 
     def browse_file(self):
         filetypes = (("PDF files", "*.pdf"), ("All files", "*.*"))
-        filename = filedialog.askopenfilename(title="Open PDF File", initialdir="source", filetypes=filetypes)
+        initialdir = os.path.join(self.app_dir, "source")
+        if not os.path.isdir(initialdir):
+            initialdir = self.app_dir
+        filename = filedialog.askopenfilename(title="Open PDF File", initialdir=initialdir, filetypes=filetypes)
         if filename:
             self.selected_file.set(filename)
 
     def browse_excel(self):
         filetypes = (("Excel files", "*.xlsx *.xls"), ("All files", "*.*"))
-        filename = filedialog.askopenfilename(title="Open Excel Template", initialdir="source", filetypes=filetypes)
+        initialdir = os.path.join(self.app_dir, "source")
+        if not os.path.isdir(initialdir):
+            initialdir = self.app_dir
+        filename = filedialog.askopenfilename(title="Open Excel Template", initialdir=initialdir, filetypes=filetypes)
         if filename:
             self.excel_file.set(filename)
 
@@ -668,10 +724,14 @@ class ConverterApp:
 
             import merge_to_excel
             importlib.reload(merge_to_excel) # Ensure fresh load
+
+            script_path = tool_config['script']
+            if script_path and not os.path.isabs(script_path):
+                script_path = os.path.join(self.app_dir, script_path)
             
             final_output = merge_to_excel.process_merge(
                 pdf_path, 
-                tool_config['script'], 
+                script_path, 
                 excel_path, 
                 pdf_cols, 
                 excel_cols,
@@ -714,6 +774,8 @@ class ConverterApp:
         try:
             # Dynamic Import of the Script
             script_file = tool_config['script']
+            if script_file and not os.path.isabs(script_file):
+                script_file = os.path.join(self.app_dir, script_file)
             
             # Load the module dynamically
             if not os.path.exists(script_file):
@@ -737,7 +799,10 @@ class ConverterApp:
                 
                 # Validation Step
                 validator_script = tool_config.get('validator')
-                
+
+                if validator_script and not os.path.isabs(validator_script):
+                    validator_script = os.path.join(self.app_dir, validator_script)
+
                 if validator_script and os.path.exists(validator_script):
                      try:
                          v_spec = importlib.util.spec_from_file_location("dynamic_validator", validator_script)

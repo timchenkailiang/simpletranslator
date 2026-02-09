@@ -1,12 +1,5 @@
 [
     {
-        "name": "1",
-        "converter": "Globe Converter",
-        "excel_template": "/Users/tim/Documents/dad/simpletranslator/source/124652.xlsx",
-        "pdf_cols": "Cantidad",
-        "excel_cols": "\u6570\u91cf"
-    },
-    {
         "name": "REI Spanish",
         "converter": "Globe Converter",
         "excel_template": "/Users/tim/Documents/dad/simpletranslator/source/124652.xlsx",
