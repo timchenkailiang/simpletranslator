@@ -18,6 +18,7 @@ dist/
 intermediate/
 output/
 *.log
+source/
 
 # OS files
 .DS_Store
