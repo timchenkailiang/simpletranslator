@@ -1,0 +1,14 @@
+[project]
+name = "simpletranslator"
+version = "1.0.0"
+description = "PDF to CSV translator and Excel merger for vendor purchase orders"
+requires-python = ">=3.10"
+dependencies = [
+    "pdfplumber>=0.11",
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"

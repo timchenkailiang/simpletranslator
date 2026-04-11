@@ -2,22 +2,19 @@
     {
         "name": "Globe Converter",
         "category": "",
-        "script": "convert_globe.py",
-        "validator": "validate_output.py",
+        "script": "converters/globe.py",
         "description": "Converts Globe PDFs. Handles Spanish/English headers."
     },
     {
         "name": "IPA Converter",
         "category": "",
-        "script": "convert_jeffco.py",
-        "validator": "validate_output.py",
+        "script": "converters/jeffco.py",
         "description": "Converts Jeffco PDF POs to CSV. Strict column buckets."
     },
     {
         "name": "Millarco",
         "category": "",
-        "script": "convert_pdf.py",
-        "validator": "validate_output.py",
+        "script": "converters/millarco.py",
         "description": "Converts Series 16 PDFs using tail-matching."
     },
     {

@@ -1,47 +1,79 @@
 # Simple PDF to CSV Translator & Merger
 
-A modular application designed to convert various Purchase Order PDF formats (e.g., Globe, Jeffco, Series 16) into structured CSV files, validate the data, and optionally merge the results into an Excel template.
+A modular, three-layer application that converts vendor-specific Purchase Order
+PDFs (Globe, Jeffco, Millarco / Series 16) into structured CSV files, validates
+the data, and merges the results into an Excel template.
 
-## Features
+## Architecture
 
-*   **GUI Application**: A user-friendly interface (`gui_app.py`) for processing single files.
-    *   **Dynamic Converter Loading**: Easily switch between different PDF formats.
-    *   **Searchable Dropdown**: Quick access to tools with type-to-search functionality.
-    *   **Validator Integration**: Automatically checks converted data for logic errors (e.g., Qty * Price = Amount).
-    *   **Excel Merger**: Merges extracted PDF data (like Price and Quantity) into an existing Excel template.
-*   **Batch Processing (CLI)**: A script (`main_convert.py`) to process entire folders of PDFs at once.
-*   **Extensible Architecture**: Add new converters by simply dropping a `.py` script into the folder and adding it to `tools.json`.
+The project follows a clean three-layer design:
+
+| Layer | Package | Purpose |
+|-------|---------|---------|
+| **1 — Converters** | `converters/` | PDF → CSV.  One module per vendor format. |
+| **2 — Engine** | `engine/` | CSV → Excel insertion + validation.  PDF-agnostic. |
+| **3 — UI** | `ui/` | Tkinter GUI (profiles, searchable dropdowns, tool CRUD). |
 
 ## Quick Start
 
-### 1. GUI Application
-Run the graphical interface:
+### Install dependencies
 ```bash
-python3 gui_app.py
+pip install -r requirements.txt
 ```
-1.  **Select Converter**: Choose the format that matches your PDF (e.g., "Globe").
-2.  **Select File**: Browse for your source PDF.
-3.  **Convert**: Click "Convert & Validate".
-4.  **(Optional) Merge**: Select an Excel template, define column mappings, and merge.
 
-### 2. Batch Processing
-Run the batch converter:
+### Launch the GUI
 ```bash
-python3 main_convert.py
+python main.py
 ```
-*Note: Currently, this requires PDFs to be pre-sorted into folders like `source/Globe`, `source/Jeffco`, etc.*
+
+1.  **Select Converter** — choose the format that matches your PDF (e.g. "Globe").
+2.  **Select PDF** — browse for the source file.
+3.  **Convert & Validate** — click the convert button.
+4.  **(Optional) Merge** — pick an Excel template, map columns, and run.
+
+### Run a converter directly (CLI)
+```bash
+python converters/globe.py path/to/file.pdf            # single file
+python converters/globe.py                              # batch (source/Globe/)
+```
 
 ## Project Structure
 
-*   `gui_app.py`: Main application window.
-*   `tools.json`: Configuration file storing available converters and their settings.
-*   `main_convert.py`: CLI script for batch processing.
-*   `merge_to_excel.py`: Logic for merging CSV data into Excel files.
-*   `validate_output.py`: Common validation logic used by all converters.
-*   `convert_*.py`: Individual layout parsers for different vendors.
+```
+simpletranslator/
+├── converters/               # Layer 1 — PDF-to-CSV parsers
+│   ├── __init__.py           #   Dynamic loader helper
+│   ├── base.py               #   BaseConverter interface docs
+│   ├── globe.py              #   Globe PO (Spanish / English)
+│   ├── jeffco.py             #   Jeffco PO
+│   └── millarco.py           #   Series 16 / Millarco PO
+│
+├── engine/                   # Layer 2 — Insertion & validation
+│   ├── __init__.py
+│   ├── merge.py              #   CSV → Excel merge (PDF-agnostic)
+│   └── validate.py           #   Numeric, math & encoding checks
+│
+├── ui/                       # Layer 3 — Front-end
+│   ├── __init__.py
+│   ├── widgets.py            #   SearchableDropdown widget
+│   └── app.py                #   ConverterApp main window
+│
+├── config/                   # Configuration
+│   ├── tools.json            #   Registered converters
+│   └── merge_profiles.json   #   Saved merge profiles
+│
+├── main.py                   # Entry point
+├── requirements.txt          # Python dependencies
+└── README.md
+```
+
+## Adding a New Converter
+
+1. Create `converters/my_vendor.py` with a `process_file(input_path, output_path)` function (return `True`/`False`).
+2. Optionally add metadata constants: `FORMAT_NAME`, `COLUMNS`, `VALIDATION_RULES`.
+3. Register it in the GUI via the **+** button, or add an entry to `config/tools.json`.
 
 ## Future Updates / Roadmap
 
-**Batch Run Enhancement**: 
-Currently, `main_convert.py` relies on a strict folder structure (e.g., needing a `source/Globe` folder) to determine which converter script to use. 
-**Future Goal**: Implement smart detection logic or a flat-file batch processor where the user can select a converter and a folder of mixed files, removing the need for manual folder sorting.
+*   **Batch GUI mode** — select a converter + folder of mixed files without manual sorting.
+*   **Web UI** — swap the Tkinter front-end for a browser-based interface (layers 1 & 2 stay unchanged).

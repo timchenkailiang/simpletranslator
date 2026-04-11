@@ -1,9 +1,30 @@
+# Python
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
 .venv/
+env/
+
+# PyInstaller
 build/
 dist/
+
+# App runtime data
+intermediate/
 output/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
 .vscode/
-source/
+*.swp
+*.swo
