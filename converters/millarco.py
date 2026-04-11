@@ -75,7 +75,7 @@ def convert_pdf_to_csv(pdf_path, csv_path):
                             if len(parts) == 2:
                                 description = clean_text(parts[1])
                             else:
-                                # Alternate layout (e.g. PO16431 middle pages):
+                                # Alternate layout (e.g. some middle pages):
                                 # item + numeric columns are on one line and
                                 # description appears in following lines.
                                 # Try to pick the closest meaningful description.

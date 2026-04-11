@@ -16,12 +16,5 @@
         "category": "",
         "script": "converters/millarco.py",
         "description": "Converts Series 16 PDFs using tail-matching."
-    },
-    {
-        "name": "Global",
-        "category": "",
-        "script": "convert_globe.py",
-        "validator": "validate_output.py",
-        "description": ""
     }
 ]
