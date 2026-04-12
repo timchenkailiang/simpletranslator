@@ -33,3 +33,6 @@ desktop.ini
 .vscode/
 *.swp
 *.swo
+
+# Test fixtures (kept locally, not versioned)
+tests/fixtures/
