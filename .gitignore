@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 *.egg
+.pytest_cache/
 
 # Virtual environments
 venv/
@@ -13,16 +14,19 @@ env/
 # PyInstaller
 build/
 dist/
+release/
 
 # App runtime data
 intermediate/
 output/
 *.log
+*.log.*
 source/
 
 # OS files
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # IDE
 .idea/

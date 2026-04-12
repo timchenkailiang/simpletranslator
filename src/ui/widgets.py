@@ -34,34 +34,6 @@ class SearchableDropdown(ttk.Frame):
         self.popup = None
         self.listbox = None
 
-        self.after(100, self._bind_toplevel)
-
-    # ── Top-level window bindings ─────────────────────────────────────
-
-    def _bind_toplevel(self):
-        try:
-            top = self.winfo_toplevel()
-            top.bind("<Button-1>", self.on_toplevel_click, add="+")
-            top.bind("<Configure>", self.on_window_move, add="+")
-        except Exception:
-            pass
-
-    def on_toplevel_click(self, event):
-        if not self.popup:
-            return
-        clicked_widget = event.widget
-        try:
-            if (str(clicked_widget).startswith(str(self)) or
-                    str(clicked_widget).startswith(str(self.popup))):
-                return
-        except Exception:
-            pass
-        self.destroy_popup()
-
-    def on_window_move(self, event):
-        if self.popup and event.widget == self.winfo_toplevel():
-            self.destroy_popup()
-
     # ── Public API ────────────────────────────────────────────────────
 
     def update_items(self, new_items):
@@ -100,12 +72,10 @@ class SearchableDropdown(ttk.Frame):
     def show_popup(self):
         if not self.popup:
             self.popup = tk.Toplevel(self)
-            try:
-                self.popup.transient(self.winfo_toplevel())
-            except Exception:
-                pass
             self.popup.wm_overrideredirect(True)
+            self.popup.wm_attributes("-topmost", True)
 
+            self.update_idletasks()
             x = self.entry.winfo_rootx()
             y = self.entry.winfo_rooty() + self.entry.winfo_height()
             w = self.entry.winfo_width() + self.btn.winfo_width()

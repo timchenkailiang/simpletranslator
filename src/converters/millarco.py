@@ -7,6 +7,7 @@ import sys
 import re
 import os
 import glob
+from utils import normalize_numeric_columns
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def process_file(input_path, output_path=None):
 
 
 def convert_pdf_to_csv(pdf_path, csv_path):
-    logger.info("Processing %s", pdf_path)
+    logger.info("Processing Series 16 file: %s → %s", pdf_path, csv_path)
 
     data = []
     headers = ["Itemno", "Description", "Master", "Inner",
@@ -47,6 +48,7 @@ def convert_pdf_to_csv(pdf_path, csv_path):
 
     try:
         with pdfplumber.open(pdf_path) as pdf:
+            logger.info("PDF has %d page(s)", len(pdf.pages))
             for page in pdf.pages:
                 text = page.extract_text()
                 if not text:
@@ -96,16 +98,18 @@ def convert_pdf_to_csv(pdf_path, csv_path):
                             data.append([itemno, description, master, inner,
                                          qty, unit_price, amount, etd])
     except Exception as e:
-        logger.error("Error reading PDF %s: %s", pdf_path, e)
+        logger.error("Series 16 conversion failed for %s: %s", pdf_path, e)
         return False
 
     if not data:
-        logger.warning("No matching table data found.")
+        logger.warning("Series 16 extraction returned 0 rows.")
         return False
 
     df = pd.DataFrame(data, columns=headers)
+    normalize_numeric_columns(df, ["Master", "Inner", "Quantity", "Unit price", "Amount"])
     df.to_csv(csv_path, index=False)
-    logger.info("Saved to %s", csv_path)
+    logger.info("Series 16 conversion complete — %d rows saved to %s",
+                len(df), csv_path)
     return True
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "simpletranslator"
-version = "1.0.0"
+version = "1.1.0"
 description = "PDF to CSV translator and Excel merger for vendor purchase orders"
 requires-python = ">=3.10"
 dependencies = [

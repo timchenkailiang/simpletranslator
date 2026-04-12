@@ -7,6 +7,7 @@ import re
 import os
 import glob
 import sys
+from utils import normalize_numeric_columns
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ def extract_jeffco_data(pdf_path):
     data_rows = []
 
     with pdfplumber.open(pdf_path) as pdf:
+        logger.info("PDF has %d page(s)", len(pdf.pages))
         for page in pdf.pages:
             words = page.extract_words()
 
@@ -123,6 +125,8 @@ def extract_jeffco_data(pdf_path):
                         }
                         data_rows.append(row_data)
 
+    logger.info("Extracted %d data rows from %s", len(data_rows),
+                os.path.basename(pdf_path))
     return data_rows
 
 
@@ -135,7 +139,7 @@ def process_file(input_path, output_path=None):
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, base_name)
 
-    logger.info("Processing Jeffco file: %s", input_path)
+    logger.info("Processing Jeffco file: %s → %s", input_path, output_path)
     try:
         data = extract_jeffco_data(input_path)
         if data:
@@ -146,14 +150,16 @@ def process_file(input_path, output_path=None):
                 if c not in df.columns:
                     df[c] = ""
             df = df[cols]
+            normalize_numeric_columns(df, ["Quantity", "Price USD"])
             df.to_csv(output_path, index=False)
-            logger.info("Saved %s", output_path)
+            logger.info("Jeffco conversion complete — %d rows saved to %s",
+                        len(df), output_path)
             return True
         else:
-            logger.warning("No data extracted.")
+            logger.warning("Jeffco extraction returned 0 rows.")
             return False
     except Exception as e:
-        logger.error("Error: %s", e)
+        logger.error("Jeffco conversion failed: %s", e)
         raise e
 
 

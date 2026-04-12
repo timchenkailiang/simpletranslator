@@ -1,3 +1,4 @@
-pdfplumber==0.11.8
-pandas==2.2.2
-openpyxl==3.1.2
+charset-normalizer==3.3.2
+pdfplumber==0.11.9
+pandas==3.0.2
+openpyxl==3.1.5

@@ -8,6 +8,7 @@ import os
 import glob
 import sys
 from datetime import datetime
+from utils import normalize_numeric_columns
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ def extract_globe_data(pdf_path):
     headers_found = False
 
     with pdfplumber.open(pdf_path) as pdf:
+        logger.info("PDF has %d page(s)", len(pdf.pages))
         for page in pdf.pages:
             words = page.extract_words()
 
@@ -146,6 +148,8 @@ def extract_globe_data(pdf_path):
                     }
                     data_rows.append(row_data)
 
+    logger.info("Extracted %d data rows from %s", len(data_rows),
+                os.path.basename(pdf_path))
     return data_rows, detected_headers
 
 
@@ -158,19 +162,27 @@ def process_file(input_path, output_path=None):
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, base_name)
 
-    logger.info("Processing Globe file: %s", input_path)
+    logger.info("Processing Globe file: %s → %s", input_path, output_path)
     try:
         data, headers_map = extract_globe_data(input_path)
         if data:
             df = pd.DataFrame(data)
+            num_cols = [
+                headers_map.get("Quantity", "Quantity"),
+                headers_map.get("Price", "Price"),
+                headers_map.get("Amount", "Amount"),
+            ]
+            normalize_numeric_columns(df, num_cols)
+            logger.debug("Normalised numeric columns: %s", num_cols)
             df.to_csv(output_path, index=False)
-            logger.info("Saved %s", output_path)
+            logger.info("Globe conversion complete — %d rows saved to %s",
+                        len(df), output_path)
             return True
         else:
-            logger.warning("No data extracted.")
+            logger.warning("Globe extraction returned 0 rows.")
             return False
     except Exception as e:
-        logger.error("Error: %s", e)
+        logger.error("Globe conversion failed: %s", e)
         raise e
 
 

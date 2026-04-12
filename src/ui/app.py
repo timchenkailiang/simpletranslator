@@ -11,13 +11,13 @@ import shutil
 
 from ui.widgets import SearchableDropdown
 from converters import load_converter_module
-from engine.merge import process_merge as merge_csv_to_excel
-from engine.merge import NoMatchesFoundError
-from engine.validate import validate_csv
+from engine.insert import NoMatchesFoundError
+from engine.pipeline import run_full_pipeline, run_extract_only
 from utils import (
     get_install_dir, get_user_data_dir, get_resource_path,
     ensure_config_exists,
 )
+from i18n import t, set_language, get_language, LANGUAGES, save_language
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class ConverterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF to Excel Merger Application")
+        self.root.title(t("app.title"))
         self.root.geometry("600x750")
 
         # Data
@@ -38,12 +38,16 @@ class ConverterApp:
 
         # Tk variables
         self.selected_file = tk.StringVar()
-        self.status_var = tk.StringVar(value="Ready")
+        self.status_var = tk.StringVar(value=t("app.ready"))
+        self.merge_progress_var = tk.DoubleVar(value=0.0)
+        self.merge_progress_label_var = tk.StringVar(value="0%")
         self.profile_var = tk.StringVar()
         self.tool_var = tk.StringVar()
         self.excel_file = tk.StringVar()
         self.pdf_cols_var = tk.StringVar()
         self.excel_cols_var = tk.StringVar()
+        self.qty_increase_var = tk.StringVar(value="5%")
+        self.qty_decrease_var = tk.StringVar(value="5%")
 
         # Config paths (config/ subdirectory)
         self.tools_path = ensure_config_exists(
@@ -57,21 +61,44 @@ class ConverterApp:
         self.create_menu()
         self.create_widgets()
 
+    # ── Language switching ─────────────────────────────────────────────
+
+    def _switch_language(self, lang_code):
+        """Switch UI language and rebuild all widgets."""
+        save_language(lang_code)
+        # Rebuild the entire UI
+        self.root.title(t("app.title"))
+        self.status_var.set(t("app.ready"))
+        # Destroy existing widgets and rebuild
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        self.create_menu()
+        self.create_widgets()
+
     # ── Data persistence ──────────────────────────────────────────────
 
     def create_menu(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
         file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Exit", command=self.root.quit)
+        menubar.add_cascade(label=t("menu.file"), menu=file_menu)
+        file_menu.add_command(label=t("menu.exit"), command=self.root.quit)
+
+        # Language menu
+        lang_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label=t("menu.language"), menu=lang_menu)
+        for code, name in LANGUAGES.items():
+            lang_menu.add_command(
+                label=name,
+                command=lambda c=code: self._switch_language(c),
+            )
 
     def load_tools(self):
         try:
             with open(self.tools_path, "r") as f:
                 data = json.load(f)
             if not isinstance(data, list):
-                raise ValueError("tools.json must be a JSON array")
+                raise ValueError(t("error.tools_json_array"))
             self.tools = [
                 t for t in data
                 if isinstance(t, dict) and "name" in t and "script" in t
@@ -85,7 +112,7 @@ class ConverterApp:
             with open(self.profiles_path, "r") as f:
                 data = json.load(f)
             if not isinstance(data, list):
-                raise ValueError("merge_profiles.json must be a JSON array")
+                raise ValueError(t("error.profiles_json_array"))
             self.profiles = [
                 p for p in data
                 if isinstance(p, dict) and "name" in p
@@ -99,7 +126,7 @@ class ConverterApp:
             with open(self.profiles_path, "w") as f:
                 json.dump(self.profiles, f, indent=4)
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save profiles: {e}")
+            messagebox.showerror(t("error"), t("error.save_profiles", e=e))
 
     def _save_tools_to_disk(self):
         """Persist the tools list to config/tools.json."""
@@ -107,7 +134,7 @@ class ConverterApp:
             with open(self.tools_path, "w") as f:
                 json.dump(self.tools, f, indent=4)
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save tools: {e}")
+            messagebox.showerror(t("error"), t("error.save_tools", e=e))
 
     def _get_intermediate_dir(self):
         """Return a writable folder for transient CSV files."""
@@ -207,17 +234,18 @@ class ConverterApp:
         padding = {"padx": 15, "pady": 5}
 
         # Title
-        ttk.Label(
-            self.root, text="PDF to Excel Data Merger",
+        self.lbl_heading = ttk.Label(
+            self.root, text=t("app.heading"),
             font=("Helvetica", 16, "bold"),
-        ).pack(pady=15)
+        )
+        self.lbl_heading.pack(pady=15)
 
         # ── 1. Profile Loader ─────────────────────────────────────────
-        frame_profile = ttk.LabelFrame(
-            self.root, text="1. Load Saved Configuration")
-        frame_profile.pack(fill="x", **padding)
+        self.frame_profile = ttk.LabelFrame(
+            self.root, text=t("section.profile"))
+        self.frame_profile.pack(fill="x", **padding)
 
-        h_frame = ttk.Frame(frame_profile)
+        h_frame = ttk.Frame(self.frame_profile)
         h_frame.pack(fill="x", padx=10, pady=5)
 
         profile_names = [p["name"] for p in self.profiles]
@@ -227,33 +255,36 @@ class ConverterApp:
         )
         self.profile_dropdown.pack(side="left", fill="x", expand=True)
 
-        ttk.Button(
-            h_frame, text="Delete Profile",
+        self.btn_delete_profile = ttk.Button(
+            h_frame, text=t("btn.delete_profile"),
             command=self.delete_profile,
-        ).pack(side="right", padx=(5, 0))
+        )
+        self.btn_delete_profile.pack(side="right", padx=(5, 0))
 
         # ── 2. PDF Input ──────────────────────────────────────────────
-        frame_input = ttk.LabelFrame(self.root, text="2. Input PDF File")
-        frame_input.pack(fill="x", **padding)
+        self.frame_input = ttk.LabelFrame(self.root, text=t("section.pdf_input"))
+        self.frame_input.pack(fill="x", **padding)
 
-        inp_layout = ttk.Frame(frame_input)
+        inp_layout = ttk.Frame(self.frame_input)
         inp_layout.pack(fill="x", padx=10, pady=5)
 
         ttk.Entry(inp_layout, textvariable=self.selected_file).pack(
             side="left", fill="x", expand=True)
-        ttk.Button(
-            inp_layout, text="Browse...", command=self.browse_file,
-        ).pack(side="right", padx=(5, 0))
+        self.btn_browse_pdf = ttk.Button(
+            inp_layout, text=t("btn.browse_dots"), command=self.browse_file,
+        )
+        self.btn_browse_pdf.pack(side="right", padx=(5, 0))
 
         # ── 3. Configuration ──────────────────────────────────────────
-        frame_config = ttk.LabelFrame(
-            self.root, text="3. Configuration Settings")
-        frame_config.pack(fill="x", **padding)
+        self.frame_config = ttk.LabelFrame(
+            self.root, text=t("section.config"))
+        self.frame_config.pack(fill="x", **padding)
 
         # Converter selector
-        c_frame = ttk.Frame(frame_config)
+        c_frame = ttk.Frame(self.frame_config)
         c_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Label(c_frame, text="Converter Model:", width=15).pack(side="left")
+        self.lbl_converter = ttk.Label(c_frame, text=t("label.converter"), width=15)
+        self.lbl_converter.pack(side="left")
 
         self.tool_dropdown = SearchableDropdown(
             c_frame, textvariable=self.tool_var,
@@ -264,51 +295,67 @@ class ConverterApp:
         ttk.Button(
             c_frame, text="+", width=3, command=self.open_add_tool_window,
         ).pack(side="right", padx=1)
-        ttk.Button(
-            c_frame, text="Edit", width=4, command=self.open_edit_tool_window,
-        ).pack(side="right", padx=1)
-
-        # Description label
-        self.desc_label = ttk.Label(
-            frame_config, text="Select a converter...",
-            font=("Helvetica", 9, "italic"), wraplength=550,
+        self.btn_edit_tool = ttk.Button(
+            c_frame, text=t("btn.edit"), width=4, command=self.open_edit_tool_window,
         )
-        self.desc_label.pack(padx=10, pady=(0, 5), fill="x")
+        self.btn_edit_tool.pack(side="right", padx=1)
 
         # Excel template
-        e_frame = ttk.Frame(frame_config)
+        e_frame = ttk.Frame(self.frame_config)
         e_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Label(e_frame, text="Excel Template:", width=15).pack(side="left")
+        self.lbl_excel_template = ttk.Label(e_frame, text=t("label.excel_template"), width=15)
+        self.lbl_excel_template.pack(side="left")
         ttk.Entry(e_frame, textvariable=self.excel_file).pack(
             side="left", fill="x", expand=True)
-        ttk.Button(
-            e_frame, text="Browse", command=self.browse_excel,
-        ).pack(side="right")
+        self.btn_browse_excel = ttk.Button(
+            e_frame, text=t("btn.browse"), command=self.browse_excel,
+        )
+        self.btn_browse_excel.pack(side="right")
 
         # Column mappings
-        col_frame = ttk.Frame(frame_config)
+        col_frame = ttk.Frame(self.frame_config)
         col_frame.pack(fill="x", padx=10, pady=5)
 
         p_col_f = ttk.Frame(col_frame)
         p_col_f.pack(fill="x", pady=2)
-        ttk.Label(p_col_f, text="PDF Columns:", width=15).pack(side="left")
+        self.lbl_pdf_cols = ttk.Label(p_col_f, text=t("label.pdf_columns"), width=15)
+        self.lbl_pdf_cols.pack(side="left")
         ttk.Entry(p_col_f, textvariable=self.pdf_cols_var).pack(
             side="left", fill="x", expand=True)
-        ttk.Label(p_col_f, text="(comma separated)").pack(
+        self.lbl_pdf_hint = ttk.Label(p_col_f, text=t("hint.comma_separated"))
+        self.lbl_pdf_hint.pack(
             side="right", padx=5)
 
         e_col_f = ttk.Frame(col_frame)
         e_col_f.pack(fill="x", pady=2)
-        ttk.Label(e_col_f, text="Excel Columns:", width=15).pack(side="left")
+        self.lbl_excel_cols = ttk.Label(e_col_f, text=t("label.excel_columns"), width=15)
+        self.lbl_excel_cols.pack(side="left")
         ttk.Entry(e_col_f, textvariable=self.excel_cols_var).pack(
             side="left", fill="x", expand=True)
-        ttk.Label(e_col_f, text="(comma separated)").pack(
+        self.lbl_excel_hint = ttk.Label(e_col_f, text=t("hint.comma_separated"))
+        self.lbl_excel_hint.pack(
             side="right", padx=5)
 
-        ttk.Button(
-            frame_config, text="💾 Save Current Settings as Profile",
+        # Quantity tolerance
+        tol_frame = ttk.Frame(self.frame_config)
+        tol_frame.pack(fill="x", padx=10, pady=5)
+        self.lbl_qty = ttk.Label(tol_frame, text=t("label.qty_tolerance"), width=15)
+        self.lbl_qty.pack(side="left")
+        ttk.Label(tol_frame, text="+").pack(side="left")
+        ttk.Entry(tol_frame, textvariable=self.qty_increase_var,
+                  width=8).pack(side="left", padx=(0, 5))
+        ttk.Label(tol_frame, text="−").pack(side="left")
+        ttk.Entry(tol_frame, textvariable=self.qty_decrease_var,
+                  width=8).pack(side="left", padx=(0, 5))
+        self.lbl_tol_hint = ttk.Label(tol_frame, text=t("hint.tolerance_format"))
+        self.lbl_tol_hint.pack(
+            side="right", padx=5)
+
+        self.btn_save_profile = ttk.Button(
+            self.frame_config, text=t("btn.save_profile"),
             command=self.save_new_profile,
-        ).pack(anchor="e", padx=10, pady=10)
+        )
+        self.btn_save_profile.pack(anchor="e", padx=10, pady=10)
 
         self.refresh_combo_list()
 
@@ -317,20 +364,39 @@ class ConverterApp:
         frame_run.pack(fill="x", padx=padding["padx"], pady=15)
 
         self.btn_run = ttk.Button(
-            frame_run, text="RUN MERGE PROCESS",
+            frame_run, text=t("btn.run_merge"),
             command=self.run_merge_thread,
         )
         self.btn_run.pack(fill="x", ipady=12)
+
+        progress_frame = ttk.Frame(self.root)
+        progress_frame.pack(fill="x", padx=padding["padx"], pady=(0, 8))
+
+        self.merge_progressbar = ttk.Progressbar(
+            progress_frame,
+            variable=self.merge_progress_var,
+            maximum=100,
+            mode="determinate",
+        )
+        self.merge_progressbar.pack(side="left", fill="x", expand=True)
+
+        ttk.Label(
+            progress_frame,
+            textvariable=self.merge_progress_label_var,
+            width=5,
+            anchor="e",
+        ).pack(side="right", padx=(8, 0))
 
         # Utilities
         ttk.Separator(self.root, orient="horizontal").pack(fill="x", pady=5)
         debug_frame = ttk.Frame(self.root)
         debug_frame.pack(fill="x", pady=5)
-        ttk.Button(
+        self.btn_convert_only = ttk.Button(
             debug_frame,
-            text="Tools: Convert PDF to CSV Only (No Merge)",
+            text=t("btn.convert_only"),
             command=self.run_conversion_thread,
-        ).pack()
+        )
+        self.btn_convert_only.pack()
 
         # Status bar
         self.lbl_status = ttk.Label(
@@ -344,17 +410,9 @@ class ConverterApp:
     def refresh_combo_list(self):
         self.tools.sort(key=lambda x: x["name"])
         self.tool_dropdown.update_items([t["name"] for t in self.tools])
-        self.update_description()
 
     def on_tool_change(self, event):
-        self.update_description()
-
-    def update_description(self):
-        name = self.tool_var.get()
-        for t in self.tools:
-            if t["name"] == name:
-                self.desc_label.config(text=t.get("description", ""))
-                break
+        pass
 
     # ── Profile management ────────────────────────────────────────────
 
@@ -375,17 +433,18 @@ class ConverterApp:
                     self.excel_file.set(resolved)
                 else:
                     messagebox.showwarning(
-                        "File Not Found",
-                        f"Template not found:\n{excel_path}\n\n"
-                        "Please select a new file.")
+                        t("warning.file_not_found_title"),
+                        t("warning.template_not_found", path=excel_path))
                     self.excel_file.set("")
             else:
                 self.excel_file.set("")
 
             self.pdf_cols_var.set(profile.get("pdf_cols", ""))
             self.excel_cols_var.set(profile.get("excel_cols", ""))
+            self.qty_increase_var.set(profile.get("qty_increase", "5%"))
+            self.qty_decrease_var.set(profile.get("qty_decrease", "5%"))
             self.on_tool_change(None)
-            self.status_var.set(f"Loaded profile: {name}")
+            self.status_var.set(t("info.loaded_profile", name=name))
 
     def save_new_profile(self):
         current_data = {
@@ -393,20 +452,21 @@ class ConverterApp:
             "excel_template": self._make_portable_path(self.excel_file.get()),
             "pdf_cols": self.pdf_cols_var.get(),
             "excel_cols": self.excel_cols_var.get(),
+            "qty_increase": self.qty_increase_var.get(),
+            "qty_decrease": self.qty_decrease_var.get(),
         }
         if not current_data["converter"] or not current_data["excel_template"]:
             messagebox.showwarning(
-                "Incomplete",
-                "Please fill in Converter, Excel Template, "
-                "and Columns before saving.",
+                t("warning.incomplete"),
+                t("warning.fill_fields"),
             )
             return
 
         ask_win = tk.Toplevel(self.root)
-        ask_win.title("Save Profile")
+        ask_win.title(t("dialog.save_profile"))
         ask_win.geometry("300x150")
 
-        ttk.Label(ask_win, text="Profile Name:").pack(pady=10)
+        ttk.Label(ask_win, text=t("label.profile_name")).pack(pady=10)
         name_var = tk.StringVar(value=self.profile_var.get())
         ttk.Entry(ask_win, textvariable=name_var).pack(
             pady=5, padx=20, fill="x")
@@ -414,13 +474,13 @@ class ConverterApp:
         def do_save():
             name = name_var.get().strip()
             if not name:
-                messagebox.showerror("Error", "Name required")
+                messagebox.showerror(t("error"), t("error.name_required"))
                 return
             existing = next(
                 (p for p in self.profiles if p["name"] == name), None)
             if existing:
                 if not messagebox.askyesno(
-                        "Overwrite", f"Profile '{name}' exists. Overwrite?"):
+                        t("confirm.overwrite"), t("confirm.overwrite_profile", name=name)):
                     return
                 existing.update(current_data)
             else:
@@ -432,38 +492,38 @@ class ConverterApp:
             self.profile_dropdown.update_items(
                 [p["name"] for p in self.profiles])
             self.profile_var.set(name)
-            messagebox.showinfo("Saved", f"Profile '{name}' saved.")
+            messagebox.showinfo(t("info.saved"), t("info.profile_saved", name=name))
             ask_win.destroy()
 
-        ttk.Button(ask_win, text="Save", command=do_save).pack(pady=10)
+        ttk.Button(ask_win, text=t("btn.save"), command=do_save).pack(pady=10)
 
     def delete_profile(self):
         name = self.profile_var.get()
         if not name:
             return
-        if messagebox.askyesno("Delete", f"Delete profile '{name}'?"):
+        if messagebox.askyesno(t("confirm.delete"), t("confirm.delete_profile", name=name)):
             self.profiles = [
                 p for p in self.profiles if p["name"] != name]
             self.save_profiles_to_disk()
             self.profile_dropdown.update_items(
                 [p["name"] for p in self.profiles])
             self.profile_var.set("")
-            messagebox.showinfo("Deleted", "Profile deleted.")
+            messagebox.showinfo(t("info.deleted"), t("info.profile_deleted"))
 
     # ── Tool management dialogs ───────────────────────────────────────
 
     def open_add_tool_window(self):
-        self._open_tool_dialog(title="Add New Converter", mode="add")
+        self._open_tool_dialog(title=t("dialog.add_converter"), mode="add")
 
     def open_edit_tool_window(self):
         current_name = self.tool_var.get()
         if not current_name:
             return
         tool = next(
-            (t for t in self.tools if t["name"] == current_name), None)
+            (tl for tl in self.tools if tl["name"] == current_name), None)
         if tool:
             self._open_tool_dialog(
-                title=f"Edit {current_name}", mode="edit", tool_data=tool)
+                title=t("dialog.edit_converter", name=current_name), mode="edit", tool_data=tool)
 
     def _open_tool_dialog(self, title, mode, tool_data=None):
         top = tk.Toplevel(self.root)
@@ -473,28 +533,28 @@ class ConverterApp:
         pad = {"padx": 10, "pady": 5}
 
         # Name
-        ttk.Label(top, text="Converter Name:").pack(anchor="w", **pad)
+        ttk.Label(top, text=t("label.converter_name")).pack(anchor="w", **pad)
         entry_name = ttk.Entry(top)
         entry_name.pack(fill="x", **pad)
         if tool_data:
             entry_name.insert(0, tool_data["name"])
 
         # Category
-        ttk.Label(top, text="Category (optional):").pack(anchor="w", **pad)
+        ttk.Label(top, text=t("label.category")).pack(anchor="w", **pad)
         entry_cat = ttk.Entry(top)
         entry_cat.pack(fill="x", **pad)
         if tool_data and "category" in tool_data:
             entry_cat.insert(0, tool_data["category"])
 
         # Description
-        ttk.Label(top, text="Description:").pack(anchor="w", **pad)
+        ttk.Label(top, text=t("label.description")).pack(anchor="w", **pad)
         entry_desc = ttk.Entry(top)
         entry_desc.pack(fill="x", **pad)
         if tool_data:
             entry_desc.insert(0, tool_data.get("description", ""))
 
         # Script
-        ttk.Label(top, text="Python Script (.py):").pack(anchor="w", **pad)
+        ttk.Label(top, text=t("label.script_file")).pack(anchor="w", **pad)
         frame_script = ttk.Frame(top)
         frame_script.pack(fill="x", **pad)
         entry_script = ttk.Entry(frame_script)
@@ -510,7 +570,7 @@ class ConverterApp:
                 entry_script.insert(0, f)
 
         ttk.Button(
-            frame_script, text="Browse", command=browse_script,
+            frame_script, text=t("btn.browse"), command=browse_script,
         ).pack(side="right", padx=(5, 0))
 
         # ── Save logic ────────────────────────────────────────────────
@@ -522,7 +582,7 @@ class ConverterApp:
 
             if not name or not source_script:
                 messagebox.showerror(
-                    "Error", "Name and Script File are required.")
+                    t("error"), t("error.name_script_required"))
                 return
 
             # Resolve script path — copy into converters/ if external
@@ -543,8 +603,8 @@ class ConverterApp:
                     full = get_resource_path(source_script)
                     if not os.path.exists(full):
                         messagebox.showerror(
-                            "Error",
-                            f"Script file not found: {source_script}")
+                            t("error"),
+                            t("error.script_not_found", path=source_script))
                         return
                     script_rel_path = source_script
 
@@ -558,8 +618,8 @@ class ConverterApp:
                 if mode == "add":
                     self.tools.append(new_entry)
                 else:
-                    for i, t in enumerate(self.tools):
-                        if t["name"] == tool_data["name"]:
+                    for i, tl in enumerate(self.tools):
+                        if tl["name"] == tool_data["name"]:
                             self.tools[i] = new_entry
                             break
 
@@ -568,19 +628,19 @@ class ConverterApp:
                 self.tool_var.set(name)
                 self.on_tool_change(None)
 
-                messagebox.showinfo("Success", f"Tool '{name}' saved!")
+                messagebox.showinfo(t("success"), t("info.tool_saved", name=name))
                 top.destroy()
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to save tool: {e}")
+                messagebox.showerror(t("error"), t("error.save_tool_failed", e=e))
 
         # Buttons
         if mode == "edit":
             def delete_tool():
                 if messagebox.askyesno(
-                        "Confirm", f"Delete '{tool_data['name']}'?"):
+                        t("confirm"), t("confirm.delete_tool", name=tool_data['name'])):
                     self.tools = [
-                        t for t in self.tools
-                        if t["name"] != tool_data["name"]
+                        tl for tl in self.tools
+                        if tl["name"] != tool_data["name"]
                     ]
                     self._save_tools_to_disk()
                     self.refresh_combo_list()
@@ -589,28 +649,28 @@ class ConverterApp:
             btn_frame = ttk.Frame(top)
             btn_frame.pack(pady=20, fill="x")
             ttk.Button(
-                btn_frame, text="Delete Tool", command=delete_tool,
+                btn_frame, text=t("btn.delete_tool"), command=delete_tool,
             ).pack(side="left", padx=10)
             ttk.Button(
-                btn_frame, text="Save Changes", command=save_tool,
+                btn_frame, text=t("btn.save_changes"), command=save_tool,
             ).pack(side="right", padx=10)
         else:
             ttk.Button(
-                top, text="Add Converter", command=save_tool,
+                top, text=t("btn.add_converter"), command=save_tool,
             ).pack(pady=20)
 
     # ── File browsing ─────────────────────────────────────────────────
 
     def browse_file(self):
         f = filedialog.askopenfilename(
-            title="Open PDF File", initialdir="source",
+            title=t("dialog.open_pdf"), initialdir="source",
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
         if f:
             self.selected_file.set(f)
 
     def browse_excel(self):
         f = filedialog.askopenfilename(
-            title="Open Excel Template", initialdir="source",
+            title=t("dialog.open_excel"), initialdir="source",
             filetypes=[("Excel files", "*.xlsx *.xls"),
                        ("All files", "*.*")])
         if f:
@@ -618,8 +678,17 @@ class ConverterApp:
 
     # ── Merge workflow (Layer 1 → Layer 2) ────────────────────────────
 
+    def _set_merge_progress(self, percent, status_text=None):
+        """Update merge progress widgets and optional status text."""
+        safe_percent = max(0, min(100, int(percent)))
+        self.merge_progress_var.set(safe_percent)
+        self.merge_progress_label_var.set(f"{safe_percent}%")
+        if status_text:
+            self.status_var.set(status_text)
+
     def run_merge_thread(self):
         # ── Validate inputs on the main (UI) thread ──────────────────
+        self._set_merge_progress(0, t("pipeline.validating_inputs"))
         pdf_path = self.selected_file.get()
         excel_path = self.excel_file.get()
         tool_name = self.tool_var.get()
@@ -628,20 +697,20 @@ class ConverterApp:
 
         if not pdf_path or not excel_path:
             messagebox.showwarning(
-                "Missing Files",
-                "Select both a PDF input and an Excel template.")
+                t("warning.missing_files"),
+                t("warning.select_both"))
             return
 
         if not pdf_cols_str or not excel_cols_str:
             messagebox.showwarning(
-                "Missing Columns",
-                "Specify columns for both PDF and Excel.")
+                t("warning.missing_columns"),
+                t("warning.specify_columns"))
             return
 
         tool_config = next(
             (t for t in self.tools if t["name"] == tool_name), None)
         if not tool_config:
-            messagebox.showerror("Error", "Tool configuration not found.")
+            messagebox.showerror(t("error"), t("error.tool_not_found"))
             return
 
         pdf_cols = [c.strip() for c in pdf_cols_str.split(",")]
@@ -649,23 +718,24 @@ class ConverterApp:
 
         if len(pdf_cols) != len(excel_cols):
             messagebox.showerror(
-                "Error",
-                f"Column count mismatch!\n"
-                f"PDF: {len(pdf_cols)}, Excel: {len(excel_cols)}")
+                t("error"),
+                t("error.column_mismatch", pdf=len(pdf_cols), excel=len(excel_cols)))
             return
 
         default_name = os.path.basename(
             excel_path).replace(".xlsx", "_merged.xlsx")
         output_path = filedialog.asksaveasfilename(
-            title="Save Merged Excel As",
+            title=t("dialog.save_merged"),
             initialfile=default_name,
             defaultextension=".xlsx",
             filetypes=[("Excel files", "*.xlsx")],
         )
         if not output_path:
+            self._set_merge_progress(0, t("app.ready"))
             return
 
-        self.status_var.set("Merging data...")
+        self.btn_run.config(state="disabled")
+        self._set_merge_progress(10, t("pipeline.preparing"))
         threading.Thread(
             target=self._run_merge_worker,
             args=(output_path, pdf_path, excel_path,
@@ -677,40 +747,75 @@ class ConverterApp:
                           tool_config, pdf_cols, excel_cols):
         """Heavy merge work — runs on a background thread."""
         try:
+            logger.info("Merge requested — tool=%s  pdf=%s  excel=%s  output=%s",
+                        tool_config["name"], pdf_path, excel_path, output_path)
+            self._ui(self._set_merge_progress, 20, t("pipeline.loading_converter"))
             script_path = get_resource_path(tool_config["script"])
             converter = load_converter_module(script_path)
             csv_path = self._prepare_intermediate_csv_path(
                 pdf_path, tool_config["name"])
-            success = converter.process_file(pdf_path, csv_path)
 
-            if not success:
-                if (os.path.exists(csv_path) and
-                        os.path.getsize(csv_path) > 0):
-                    logger.warning(
-                        "Converter returned False but CSV exists.")
-                else:
-                    raise Exception("PDF to CSV conversion failed.")
+            def on_progress(pct, msg):
+                self._ui(self._set_merge_progress, pct, msg)
 
-            final_output = merge_csv_to_excel(
-                csv_path, excel_path, pdf_cols, excel_cols,
+            result = run_full_pipeline(
+                pdf_path, csv_path, excel_path,
+                converter, pdf_cols, excel_cols,
                 output_path=output_path,
+                on_progress=on_progress,
+                qty_increase_ratio=self.qty_increase_var.get(),
+                qty_decrease_ratio=self.qty_decrease_var.get(),
             )
 
-            self._ui(self.status_var.set,
-                     f"Success! Saved to {final_output}")
-            self._ui(messagebox.showinfo, "Success",
-                     f"Merge complete!\nSaved to:\n{final_output}")
+            removed = result.get('rows_removed', 0)
+            report = (
+                t("report.rows_extracted", n=result['rows_extracted']) + "\n"
+            )
+            if removed:
+                report += t("report.rows_removed", n=removed) + "\n"
+            report += (
+                t("report.validation_flags", n=result['cells_flagged']) + "\n"
+                + t("report.rows_matched", matched=result['rows_matched'], total=result['total_csv_rows']) + "\n"
+                + t("report.rows_not_found", n=result['rows_not_found']) + "\n"
+            )
+            if result.get("missing_columns"):
+                report += t("report.missing_columns", cols=', '.join(result['missing_columns'])) + "\n"
+            if result.get("qty_recalc_disabled"):
+                report += t("report.qty_disabled") + "\n"
+            report += (
+                f"{'─' * 35}\n"
+                + t("report.output", path=result['output_path'])
+            )
+            self._ui(self._set_merge_progress, 100,
+                     t("report.success_saved", path=result['output_path']))
+            self._ui(messagebox.showinfo, t("report.merge_complete"), report)
 
-        except NoMatchesFoundError:
-            self._ui(self.status_var.set,
-                     "No matches. File not generated.")
-            self._ui(messagebox.showwarning, "No Matches",
-                     "No matches found. A new file was not generated.")
+        except NoMatchesFoundError as e:
+            stats = e.stats
+            removed = stats.get('rows_removed', 0)
+            report = (
+                t("report.rows_extracted", n=stats.get('rows_extracted', '?')) + "\n"
+            )
+            if removed:
+                report += t("report.rows_removed", n=removed) + "\n"
+            report += (
+                t("report.validation_flags", n=stats.get('cells_flagged', '?')) + "\n"
+                + t("report.rows_matched", matched=0, total=stats.get('total_csv_rows', '?')) + "\n"
+                + f"{'─' * 35}\n"
+                + t("report.no_matches_body")
+            )
+            logger.warning("Merge finished with no matches — file not generated.")
+            self._ui(self._set_merge_progress, 0,
+                     t("report.no_matches_status"))
+            self._ui(messagebox.showwarning, t("report.no_matches_title"), report)
         except Exception as e:
             logger.exception("Merge failed")
-            self._ui(self.status_var.set, "Error during merge.")
-            self._ui(messagebox.showerror, "Error",
-                     f"An error occurred:\n{e}")
+            self._ui(self._set_merge_progress, 0, t("report.error_during_merge"))
+            self._ui(self.status_var.set, t("report.error_during_merge"))
+            self._ui(messagebox.showerror, t("error"),
+                     t("error.merge_error", e=e))
+        finally:
+            self._ui(self.btn_run.config, state="normal")
 
     # ── Convert-only workflow (Layer 1 only) ──────────────────────────
 
@@ -719,77 +824,72 @@ class ConverterApp:
         tool_name = self.tool_var.get()
 
         if not input_path:
-            messagebox.showwarning("Warning", "Please select a file first.")
+            messagebox.showwarning(t("warning"), t("warning.select_file_first"))
             return
         if not os.path.exists(input_path):
-            messagebox.showerror("Error", "File not found.")
+            messagebox.showerror(t("error"), t("error.file_not_found"))
             return
 
         tool_config = next(
-            (t for t in self.tools if t["name"] == tool_name), None)
+            (t_item for t_item in self.tools if t_item["name"] == tool_name), None)
         if not tool_config:
-            messagebox.showerror("Error", "Tool configuration not found.")
+            messagebox.showerror(t("error"), t("error.tool_not_found"))
+            return
+
+        default_name = os.path.splitext(
+            os.path.basename(input_path))[0] + ".csv"
+        csv_output_path = filedialog.asksaveasfilename(
+            title=t("dialog.save_csv"),
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not csv_output_path:
             return
 
         self.btn_run.config(state="disabled")
-        self.status_var.set(f"Running {tool_name}...")
+        self.status_var.set(t("convert.running", name=tool_name))
 
         threading.Thread(
             target=self._run_conversion_worker,
-            args=(input_path, tool_config),
+            args=(input_path, tool_config, csv_output_path),
             daemon=True,
         ).start()
 
-    def _run_conversion_worker(self, input_path, tool_config):
+    def _run_conversion_worker(self, input_path, tool_config, csv_output_path):
         """Heavy conversion work — runs on a background thread."""
         try:
-            # ── Layer 1: Convert ──────────────────────────────────────
+            logger.info("Convert-only requested — tool=%s  pdf=%s  output=%s",
+                        tool_config["name"], input_path, csv_output_path)
             script_path = get_resource_path(tool_config["script"])
-            module = load_converter_module(script_path)
+            converter = load_converter_module(script_path)
+            output_path = csv_output_path
 
-            output_path = self._prepare_intermediate_csv_path(
-                input_path, tool_config["name"])
-            success = module.process_file(input_path, output_path)
+            def on_progress(pct, msg):
+                self._ui(self.status_var.set, msg)
 
-            if success:
-                self._ui(self.status_var.set,
-                         "Conversion successful. Validating...")
+            csv_path, flagged_cells = run_extract_only(
+                input_path, output_path, converter,
+                on_progress=on_progress,
+            )
 
-                # Use converter metadata for validation when available
-                fmt = getattr(module, "FORMAT_NAME", None)
-                rules = getattr(module, "VALIDATION_RULES", None)
+            flag_msg = ""
+            if flagged_cells:
+                flag_msg = "\n\n" + t("convert.flagged", n=len(flagged_cells))
 
-                try:
-                    validate_csv(
-                        output_path,
-                        format_name=fmt,
-                        validation_rules=rules,
-                    )
-                    self._ui(
-                        self.status_var.set,
-                        f"Done! Saved to {os.path.basename(output_path)}")
-                    self._ui(
-                        messagebox.showinfo, "Success",
-                        f"Converted & validated!\n\n"
-                        f"Saved to: {output_path}\n\n"
-                        f"(Check log for details)")
-                except Exception as ve:
-                    logger.exception("Validation failed")
-                    self._ui(self.status_var.set,
-                             "Conversion OK, Validation Failed")
-                    self._ui(
-                        messagebox.showwarning, "Warning",
-                        f"Conversion succeeded but validation crashed:\n{ve}")
-            else:
-                self._ui(self.status_var.set,
-                         "Conversion failed (no data).")
-                self._ui(messagebox.showerror, "Error",
-                         "Conversion returned no data.")
+            logger.info("Convert-only finished — %s  (%d flagged)",
+                        csv_path, len(flagged_cells))
+            self._ui(
+                self.status_var.set,
+                t("convert.done", name=os.path.basename(csv_path)))
+            self._ui(
+                messagebox.showinfo, t("success"),
+                t("convert.success_msg", path=csv_path, flag_msg=flag_msg))
 
         except Exception as e:
             logger.exception("Conversion failed")
-            self._ui(self.status_var.set, "Error Occurred")
-            self._ui(messagebox.showerror, "Error", str(e))
+            self._ui(self.status_var.set, t("report.error_occurred"))
+            self._ui(messagebox.showerror, t("error"), str(e))
         finally:
             self._ui(self.btn_run.config, state="normal")
 

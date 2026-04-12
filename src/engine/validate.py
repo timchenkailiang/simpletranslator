@@ -7,10 +7,10 @@ metadata from a converter module's ``FORMAT_NAME`` / ``VALIDATION_RULES``.
 
 import logging
 import os
-import re
 import sys
 import glob
 import pandas as pd
+from utils import parse_localized_number
 
 logger = logging.getLogger(__name__)
 
@@ -25,36 +25,7 @@ def parse_number(value_str):
     """
     if pd.isna(value_str) or value_str == "":
         return None
-
-    if not isinstance(value_str, str):
-        return float(value_str)
-
-    clean = value_str.strip()
-    if not clean:
-        return None
-
-    # Strip currency noise
-    clean = clean.replace("USD", "").replace("$", "").replace("€", "").strip()
-
-    # EU thousands separator: 2.000,00
-    if re.search(r"\.\d{3},", clean):
-        clean = clean.replace(".", "").replace(",", ".")
-    # US thousands separator: 2,000.00
-    elif re.search(r",\d{3}\.", clean):
-        clean = clean.replace(",", "")
-    # Dot-only, might be thousands: 1.120 → 1120
-    elif "," not in clean and "." in clean:
-        parts = clean.split(".")
-        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
-            clean = clean.replace(".", "")
-    # Comma-only decimal: 1234,56
-    elif "," in clean and "." not in clean:
-        clean = clean.replace(",", ".")
-
-    try:
-        return float(clean)
-    except ValueError:
-        return None
+    return parse_localized_number(value_str)
 
 
 # ── Math check ────────────────────────────────────────────────────────
@@ -121,21 +92,34 @@ def validate_csv(file_path, format_name=None, validation_rules=None):
     """
     Validate a single CSV file.
 
+    Returns a set of ``(key_value, column_name)`` tuples identifying cells
+    that have issues (numeric errors, math mismatches, suspicious chars).
+    The *key_value* comes from the first CSV column — the same column the
+    merge engine uses as a lookup key — so callers can pass the set
+    straight into ``process_insert(flagged_cells=…)``.
+
+    The set is designed to be **additive**: other pre-insertion phases can
+    union their own entries into the same set before merge.
+
     Args:
         file_path: Path to the CSV file.
         format_name: Optional — skip auto-detection when provided.
         validation_rules: Optional dict with keys ``'qty'``, ``'price'``,
             ``'amount'`` mapping to column names.
     """
+    flagged: set[tuple[str, str]] = set()
+    rows_removed = 0
+
     logger.info("Validating %s", file_path)
 
     try:
         df = pd.read_csv(file_path, dtype=str)
     except Exception as e:
         logger.error("Could not read file %s: %s", file_path, e)
-        return
+        return flagged, rows_removed
 
     columns = list(df.columns)
+    key_col = columns[0]  # same key the merge engine uses
 
     # Detect or use provided metadata
     if format_name is None or validation_rules is None:
@@ -151,13 +135,14 @@ def validate_csv(file_path, format_name=None, validation_rules=None):
 
     if df.empty:
         logger.warning("File is empty (no data rows).")
-        return
+        return flagged, rows_removed
 
     logger.info("Format: %s | Rows: %d", format_name, len(df))
 
-    # ── Numeric validation ────────────────────────────────────────────
+    # ── Numeric validation — drop rows with invalid strings ─────────
     numeric_issues = 0
     math_issues = 0
+    rows_to_drop: set[int] = set()
 
     cols_to_check = [
         validation_rules.get(k)
@@ -170,9 +155,18 @@ def validate_csv(file_path, format_name=None, validation_rules=None):
             continue
         for idx, val in df[col].items():
             if parse_number(val) is None and val != "" and not pd.isna(val):
-                logger.warning("[Numeric] Row %d col '%s' invalid number: '%s'",
-                               idx, col, val)
+                key = str(df.at[idx, key_col]).strip()
+                logger.info("[Numeric] Row %d col '%s' invalid string: '%s' — row will be removed",
+                            idx, col, val)
+                rows_to_drop.add(idx)
                 numeric_issues += 1
+
+    if rows_to_drop:
+        rows_removed = len(rows_to_drop)
+        logger.info("Removing %d row(s) with invalid numeric data.", rows_removed)
+        df = df.drop(index=rows_to_drop).reset_index(drop=True)
+        df.to_csv(file_path, index=False)
+        logger.info("CSV rewritten — %d rows remain.", len(df))
 
     # ── Math check (Qty × Price = Amount) ─────────────────────────────
     amt_col = validation_rules.get("amount")
@@ -182,10 +176,14 @@ def validate_csv(file_path, format_name=None, validation_rules=None):
         for idx, row in df.iterrows():
             ok, calc, actual = _check_math(row, qty_c, prc_c, amt_col)
             if not ok:
-                logger.warning(
+                key = str(row[key_col]).strip()
+                logger.info(
                     "[Math] Row %d: %s(%s) × %s(%s) ≠ %s(%s)  [Calc: %.2f]",
                     idx, qty_c, row[qty_c], prc_c, row[prc_c],
                     amt_col, row[amt_col], calc)
+                flagged.add((key, qty_c))
+                flagged.add((key, prc_c))
+                flagged.add((key, amt_col))
                 math_issues += 1
 
     if numeric_issues == 0 and math_issues == 0:
@@ -194,19 +192,29 @@ def validate_csv(file_path, format_name=None, validation_rules=None):
     # ── Suspicious characters ─────────────────────────────────────────
     char_issues = False
     for col in df.columns:
-        if df[col].dtype != object:
+        if not pd.api.types.is_string_dtype(df[col]):
             continue
         for idx, val in df[col].items():
             if not isinstance(val, str):
                 continue
             for char, name in SUSPICIOUS_CHARS.items():
                 if char in val:
-                    logger.warning("Found %s in row %d, column '%s': '%s'",
-                                   name, idx, col, val)
+                    key = str(df.at[idx, key_col]).strip()
+                    logger.info("Found %s in row %d, column '%s': '%s'",
+                                name, idx, col, val)
+                    flagged.add((key, col))
                     char_issues = True
 
     if not char_issues:
         logger.info("No suspicious characters found.")
+
+    if flagged:
+        logger.info("Flagged %d cell(s):", len(flagged))
+        for key, col in sorted(flagged):
+            logger.info("  → key='%s'  column='%s'", key, col)
+    else:
+        logger.info("No cells flagged.")
+    return flagged, rows_removed
 
 
 def validate_csvs(target_path):

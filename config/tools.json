@@ -1,9 +1,9 @@
 [
     {
-        "name": "Globe Converter",
+        "name": "REI Converter",
         "category": "",
         "script": "converters/globe.py",
-        "description": "Converts Globe PDFs. Handles Spanish/English headers."
+        "description": "Converts REI PDFs. Handles Spanish/English headers."
     },
     {
         "name": "IPA Converter",

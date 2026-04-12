@@ -48,4 +48,8 @@ def load_converter_module(script_path):
             f"'process_file(input_path, output_path)' function."
         )
 
+    fmt = getattr(module, "FORMAT_NAME", "Unknown")
+    cols = getattr(module, "COLUMNS", [])
+    logger.info("Loaded converter '%s' from %s  (FORMAT_NAME=%s, COLUMNS=%s)",
+                mod_name, script_path, fmt, cols)
     return module
