@@ -39,23 +39,32 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Parameters: "--lang {code:GetLangCode}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+// Return the two-letter language code chosen by the user in the installer.
+function GetLangCode(Param: String): String;
+begin
+  if ActiveLanguage = 'chinesesimplified' then
+    Result := 'zh'
+  else
+    Result := 'en';
+end;
+
 // Write the installer language choice to language.json so the app
 // starts in the same language the user selected during installation.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Lang: String;
   Code: String;
+  Dir: String;
 begin
   if CurStep = ssPostInstall then
   begin
-    if ActiveLanguage = 'chinesesimplified' then
-      Code := 'zh'
-    else
-      Code := 'en';
+    Code := GetLangCode('');
+    Dir := ExpandConstant('{app}\config');
+    ForceDirectories(Dir);
     Lang := '{"language": "' + Code + '"}';
-    SaveStringToFile(ExpandConstant('{app}\config\language.json'), Lang, False);
+    SaveStringToFile(Dir + '\language.json', Lang, False);
   end;
 end;
