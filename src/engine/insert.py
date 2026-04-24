@@ -10,10 +10,23 @@ import logging
 import math
 import pandas as pd
 import os
-from openpyxl.styles import PatternFill
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill
 from utils import smart_number_convert
 
 logger = logging.getLogger(__name__)
+
+# Excel number_format code that forces a cell to be treated as text.  We
+# apply it to identifier-like values (leading-zero part numbers, long
+# digit strings) so Excel does not strip the zeros or switch to
+# scientific notation on display.
+_TEXT_FORMAT = "@"
+
+# Every cell written by the insert engine is stamped with this font so
+# the merged sheet has a consistent typography regardless of whatever
+# (possibly mixed) fonts the template happened to carry.
+_INSERT_FONT_NAME = "Times New Roman"
+_INSERT_FONT_SIZE = 9
 
 # Red fill — applied to all cells that were updated (written to)
 _RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE",
@@ -174,35 +187,107 @@ def extract_data_from_csv(csv_path, data_cols):
     return df[final_cols]
 
 
+# ── Identifier / text-safe value handling ────────────────────────────
+
+def _is_identifier_code(value):
+    """Detect an identifier-like string that must be preserved as text.
+
+    Matches purely-numeric strings that either:
+
+    * start with a leading ``0`` (e.g. ``"000461200000102"``), or
+    * exceed 15 digits (where ``float`` loses precision — Excel only
+      stores 15 significant digits in numeric cells).
+    """
+    if not isinstance(value, str):
+        return False
+    s = value.strip()
+    if not s or not s.isdigit():
+        return False
+    if s.startswith("0") and len(s) > 1:
+        return True
+    return len(s) > 15
+
+
+def _canonicalize_excel_value(cell_value):
+    """Return a canonical string form for an openpyxl cell value.
+
+    Integer-valued floats like ``461200000102.0`` are stored by Excel as
+    numbers, but CSV keys typically arrive as plain digit strings
+    (``"461200000102"``).  Canonicalising both sides makes the lookup
+    match regardless of the original storage type.
+    """
+    if cell_value is None:
+        return None
+    if isinstance(cell_value, float) and cell_value.is_integer():
+        return str(int(cell_value))
+    if isinstance(cell_value, (int, float)):
+        return str(cell_value)
+    return str(cell_value).strip()
+
+
+def _coerce_value_for_excel(raw):
+    """Prepare a raw CSV value for writing to a cell.
+
+    Returns a ``(value, force_text)`` pair:
+
+    * ``force_text=True``  — the value is an identifier-like digit string
+      and the caller should set ``cell.number_format = '@'`` before
+      assignment so Excel doesn't strip leading zeros or convert to
+      scientific notation.
+    * ``force_text=False`` — the value has been parsed as a number (when
+      possible) or passed through as free text; the destination cell's
+      existing number format is left untouched.
+    """
+    if raw is None:
+        return "", False
+    # Guard against pandas NaN (float('nan') != itself)
+    if isinstance(raw, float) and raw != raw:
+        return "", False
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return "", False
+        if _is_identifier_code(stripped):
+            return stripped, True
+    return smart_number_convert(raw), False
+
+
 # ── Excel lookup (read once) ─────────────────────────────────────────
 
 def _build_excel_lookup(excel_path):
     """
     Read the Excel file *once* and return two dicts:
 
-    * ``row_lookup``: ``cell_value → first 0-based row index``
+    * ``row_lookup``: ``canonical_cell_value → first 0-based row index``
       Keys are **case-sensitive** (used for matching data values).
-    * ``col_lookup``: ``lowercased_value → first 0-based column index``
+    * ``col_lookup``: ``lowercased_canonical_value → first 0-based column index``
       Keys are **lowercased** so all header lookups are case-insensitive.
 
     Duplicate values record only the **first** (top-left) occurrence.
+    Numeric cells are canonicalised via :func:`_canonicalize_excel_value`
+    so that an integer stored as ``461200000102`` matches a CSV string
+    key of the same value (or its leading-zero-padded variant is handled
+    consistently).
     """
-    df = pd.read_excel(excel_path, header=None, dtype=str)
+    wb = load_workbook(excel_path, data_only=True, read_only=True)
+    ws = wb.active
 
     row_lookup = {}
     col_lookup = {}
 
-    for r in range(len(df)):
-        for c in range(len(df.columns)):
-            cell = df.iloc[r, c]
-            if pd.isna(cell):
-                continue
-            val = str(cell).strip()
-            if val not in row_lookup:
-                row_lookup[val] = r
-            val_lower = val.lower()
-            if val_lower not in col_lookup:
-                col_lookup[val_lower] = c
+    try:
+        for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
+            for c_idx, raw_cell in enumerate(row):
+                val = _canonicalize_excel_value(raw_cell)
+                if not val:
+                    continue
+                if val not in row_lookup:
+                    row_lookup[val] = r_idx
+                val_lower = val.lower()
+                if val_lower not in col_lookup:
+                    col_lookup[val_lower] = c_idx
+    finally:
+        wb.close()
 
     return row_lookup, col_lookup
 
@@ -312,13 +397,9 @@ def process_insert(csv_path, excel_path, csv_cols, excel_cols,
     # ── 2. Load Excel workbook ────────────────────────────────────────
     try:
         logger.info("--- Step 2: Loading Excel File ---")
-        from openpyxl import load_workbook
         wb = load_workbook(excel_path)
         ws = wb.active
         logger.info("Excel file loaded successfully.")
-    except ImportError:
-        raise ImportError(
-            "openpyxl is required. Install with: pip install openpyxl")
     except Exception as e:
         logger.error("FAILED at Step 2 (Loading Excel): %s", e)
         raise
@@ -401,7 +482,14 @@ def process_insert(csv_path, excel_path, csv_cols, excel_cols,
     skipped_count = 0
     logger.info("--- Step 4: Updating %d Items ---", total)
     for idx, (_, row) in enumerate(df_data.iterrows(), 1):
-        item_val = str(row[key_col_name]).strip()
+        raw_key = row[key_col_name]
+        # Canonicalise the lookup key the same way the Excel side was
+        # canonicalised so that identifier codes like "000461200000102"
+        # match whether the Excel template stored them as text or as a
+        # number (which openpyxl reads back as a float).
+        item_val = _canonicalize_excel_value(raw_key) or ""
+        if not item_val:
+            continue
 
         if idx <= 5 or idx % 10 == 0:
             logger.debug("Processing %d/%d: '%s'", idx, total, item_val)
@@ -414,12 +502,13 @@ def process_insert(csv_path, excel_path, csv_cols, excel_cols,
         target_row = row_idx + 1  # openpyxl is 1-indexed
 
         for c_col, target_col in mapping_pairs:
-            val = smart_number_convert(row.get(c_col, ""))
+            val, force_text = _coerce_value_for_excel(row.get(c_col, ""))
             original_val = val  # preserve CSV value before recalculation
 
             # Quantity recalculation: format as "original/calculated"
             if (qty_recalc_enabled and c_col == resolved_qty_csv_col
-                    and pcs_ctn_col_idx and pcs_plt_col_idx):
+                    and pcs_ctn_col_idx and pcs_plt_col_idx
+                    and not force_text):
                 pcs_ctn_val = ws.cell(
                     row=target_row, column=pcs_ctn_col_idx).value
                 pcs_plt_val = ws.cell(
@@ -427,19 +516,22 @@ def process_insert(csv_path, excel_path, csv_cols, excel_cols,
                 pcs_ctn = smart_number_convert(pcs_ctn_val)
                 pcs_plt = smart_number_convert(pcs_plt_val)
 
-                if pcs_ctn is not None and pcs_plt is not None:
+                if (isinstance(pcs_ctn, (int, float))
+                        and isinstance(pcs_plt, (int, float))):
                     new_qty = calculate_new_quantity(
                         val, pcs_ctn, pcs_plt,
                         max_increase=qty_increase_ratio,
                         max_decrease=qty_decrease_ratio)
                     if new_qty is None:
                         val = f"{val}/N\u00b7A"
+                        force_text = True  # compound string → text cell
                         logger.info(
                             "  Qty recalc for '%s': Pcs/Ctn=%s Pcs/Plt=%s → %s "
                             "(no valid packing within tolerance)",
                             item_val, pcs_ctn, pcs_plt, val)
                     elif not _values_equal(val, new_qty):
                         val = f"{val}/{new_qty}"
+                        force_text = True  # compound string → text cell
                         logger.info(
                             "  Qty recalc for '%s': Pcs/Ctn=%s Pcs/Plt=%s → %s",
                             item_val, pcs_ctn, pcs_plt, val)
@@ -455,7 +547,29 @@ def process_insert(csv_path, excel_path, csv_cols, excel_cols,
                 if _values_equal(existing, val):
                     skipped_count += 1
                     continue
+
+                # Force every inserted cell to Times New Roman 9 while
+                # preserving any other font decorations (bold, italic,
+                # underline, color) the template had on that cell.
+                # Alignment / border / fill are left untouched by this
+                # assignment.  number_format is overridden only when the
+                # value is an identifier-like string so Excel renders it
+                # verbatim.
+                prev = cell.font
+                cell.font = Font(
+                    name=_INSERT_FONT_NAME,
+                    size=_INSERT_FONT_SIZE,
+                    bold=prev.bold,
+                    italic=prev.italic,
+                    underline=prev.underline,
+                    strike=prev.strike,
+                    color=prev.color,
+                    vertAlign=prev.vertAlign,
+                )
+                if force_text:
+                    cell.number_format = _TEXT_FORMAT
                 cell.value = val
+
                 # Yellow = validation warning
                 # Red = value was modified from original CSV value
                 # No fill = straight passthrough from CSV

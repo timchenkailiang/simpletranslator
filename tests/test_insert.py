@@ -19,6 +19,9 @@ from engine.insert import (
     _build_excel_lookup,
     _find_name_icase,
     _values_equal,
+    _is_identifier_code,
+    _coerce_value_for_excel,
+    _canonicalize_excel_value,
     process_insert,
     calculate_new_quantity,
     NoMatchesFoundError,
@@ -678,6 +681,278 @@ class TestQtyRecalcDisabledStat(unittest.TestCase):
             qty_csv_col="Quantity")
 
         self.assertFalse(result["qty_recalc_disabled"])
+
+
+# ── Identifier / leading-zero preservation ───────────────────────────
+
+class TestIsIdentifierCode(unittest.TestCase):
+    def test_leading_zero_preserved(self):
+        self.assertTrue(_is_identifier_code("000461200000102"))
+
+    def test_leading_zero_short(self):
+        self.assertTrue(_is_identifier_code("0123"))
+
+    def test_single_zero_is_not_identifier(self):
+        # "0" by itself is just the number zero, not a code.
+        self.assertFalse(_is_identifier_code("0"))
+
+    def test_long_digit_string_is_identifier(self):
+        # 16-digit number exceeds float precision — treat as text.
+        self.assertTrue(_is_identifier_code("1234567890123456"))
+
+    def test_short_number_is_not_identifier(self):
+        self.assertFalse(_is_identifier_code("123"))
+
+    def test_non_digit_is_not_identifier(self):
+        self.assertFalse(_is_identifier_code("A0001"))
+        self.assertFalse(_is_identifier_code(""))
+        self.assertFalse(_is_identifier_code("  "))
+
+    def test_non_string_is_not_identifier(self):
+        self.assertFalse(_is_identifier_code(0))
+        self.assertFalse(_is_identifier_code(None))
+        self.assertFalse(_is_identifier_code(100.5))
+
+
+class TestCoerceValueForExcel(unittest.TestCase):
+    def test_leading_zero_returns_text(self):
+        val, force_text = _coerce_value_for_excel("000461200000102")
+        self.assertEqual(val, "000461200000102")
+        self.assertTrue(force_text)
+
+    def test_plain_integer_becomes_number(self):
+        val, force_text = _coerce_value_for_excel("100")
+        self.assertEqual(val, 100.0)
+        self.assertFalse(force_text)
+
+    def test_decimal_becomes_number(self):
+        val, force_text = _coerce_value_for_excel("5.5")
+        self.assertEqual(val, 5.5)
+        self.assertFalse(force_text)
+
+    def test_free_text_passes_through(self):
+        val, force_text = _coerce_value_for_excel("Hello")
+        self.assertEqual(val, "Hello")
+        self.assertFalse(force_text)
+
+    def test_none_returns_blank(self):
+        val, force_text = _coerce_value_for_excel(None)
+        self.assertEqual(val, "")
+        self.assertFalse(force_text)
+
+    def test_nan_returns_blank(self):
+        val, force_text = _coerce_value_for_excel(float("nan"))
+        self.assertEqual(val, "")
+        self.assertFalse(force_text)
+
+
+class TestCanonicalizeExcelValue(unittest.TestCase):
+    def test_integer_valued_float_stripped(self):
+        self.assertEqual(_canonicalize_excel_value(461200000102.0),
+                         "461200000102")
+
+    def test_non_integer_float_preserved(self):
+        self.assertEqual(_canonicalize_excel_value(5.5), "5.5")
+
+    def test_string_stripped(self):
+        self.assertEqual(_canonicalize_excel_value("  A001 "), "A001")
+
+    def test_none_returns_none(self):
+        self.assertIsNone(_canonicalize_excel_value(None))
+
+
+class TestLeadingZeroPreservation(unittest.TestCase):
+    """End-to-end: product codes with leading zeros stay intact in the
+    merged Excel file and do not switch to scientific notation."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_leading_zero_part_number_written_as_text(self):
+        csv_path = os.path.join(self.tmpdir, "data.csv")
+        excel_path = os.path.join(self.tmpdir, "template.xlsx")
+        output_path = os.path.join(self.tmpdir, "output.xlsx")
+
+        # Scenario: the merge mirrors the product code from the CSV into
+        # a "PartCode" column of the Excel template.  The CSV has the
+        # code with leading zeros; the Excel template has the key in a
+        # plain "Ref" column and a blank "PartCode" column to populate.
+        _make_csv(csv_path,
+                  ["Ref", "PartCode"],
+                  [["A001", "000461200000102"],
+                   ["A002", "00123"]])
+        _make_excel(excel_path,
+                    ["Ref", "PartCode"],
+                    [["A001", ""], ["A002", ""]])
+
+        process_insert(
+            csv_path, excel_path,
+            csv_cols=["PartCode"], excel_cols=["PartCode"],
+            output_path=output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb.active
+        cell_a = ws.cell(row=2, column=2)
+        cell_b = ws.cell(row=3, column=2)
+        self.assertEqual(cell_a.value, "000461200000102")
+        self.assertEqual(cell_a.number_format, "@")
+        self.assertEqual(cell_b.value, "00123")
+        self.assertEqual(cell_b.number_format, "@")
+
+    def test_plain_number_still_written_as_number(self):
+        """Regular quantities are still stored as numbers (not text)."""
+        csv_path = os.path.join(self.tmpdir, "data.csv")
+        excel_path = os.path.join(self.tmpdir, "template.xlsx")
+        output_path = os.path.join(self.tmpdir, "output.xlsx")
+
+        _make_csv(csv_path, ["Item", "Quantity"], [["A001", "504"]])
+        _make_excel(excel_path, ["Item", "Qty"], [["A001", ""]])
+
+        process_insert(
+            csv_path, excel_path,
+            csv_cols=["Quantity"], excel_cols=["Qty"],
+            output_path=output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb.active
+        cell = ws.cell(row=2, column=2)
+        # Written as a number, not text — and its number_format was NOT
+        # overridden, so the template's formatting remains in effect.
+        self.assertEqual(cell.value, 504.0)
+        self.assertNotEqual(cell.number_format, "@")
+
+
+class TestNumericKeyLookup(unittest.TestCase):
+    """The Excel template may store the key column as a number (which
+    openpyxl reads back as a float).  The CSV key will still arrive as a
+    plain digit string.  _build_excel_lookup should canonicalise both
+    sides so the match succeeds."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_numeric_excel_key_matches_string_csv_key(self):
+        csv_path = os.path.join(self.tmpdir, "data.csv")
+        excel_path = os.path.join(self.tmpdir, "template.xlsx")
+        output_path = os.path.join(self.tmpdir, "output.xlsx")
+
+        # Excel stores the Ref as a real number 600200107 (no leading
+        # zero so nothing is lost).  CSV has the string "600200107".
+        _make_csv(csv_path, ["Ref", "Qty"], [["600200107", "1000"]])
+        _make_excel(excel_path, ["Ref", "Qty"], [[600200107, ""]])
+
+        result = process_insert(
+            csv_path, excel_path,
+            csv_cols=["Qty"], excel_cols=["Qty"],
+            output_path=output_path)
+        self.assertEqual(result["rows_matched"], 1)
+        self.assertEqual(result["rows_not_found"], 0)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb.active
+        self.assertEqual(ws.cell(row=2, column=2).value, 1000.0)
+
+
+class TestFormatPreservation(unittest.TestCase):
+    """Writing a value should preserve the destination cell's existing
+    typography (font, alignment, number format for numeric cells)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_styled_template(self, path):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Item", "Qty"])
+        ws.append(["A001", None])
+        # Apply a distinctive font + alignment + number format to the
+        # destination cell so we can assert nothing clobbers it.
+        cell = ws.cell(row=2, column=2)
+        cell.font = Font(name="Times New Roman", size=14, bold=True)
+        cell.alignment = Alignment(horizontal="right")
+        cell.number_format = "#,##0"
+        wb.save(path)
+
+    def test_inserted_cell_is_times_new_roman_9(self):
+        """Every inserted cell is stamped Times New Roman size 9; the
+        template's alignment / border / number format are preserved."""
+        csv_path = os.path.join(self.tmpdir, "data.csv")
+        excel_path = os.path.join(self.tmpdir, "template.xlsx")
+        output_path = os.path.join(self.tmpdir, "output.xlsx")
+
+        _make_csv(csv_path, ["Item", "Quantity"], [["A001", "2500"]])
+        self._make_styled_template(excel_path)
+
+        process_insert(
+            csv_path, excel_path,
+            csv_cols=["Quantity"], excel_cols=["Qty"],
+            output_path=output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb.active
+        cell = ws.cell(row=2, column=2)
+        self.assertEqual(cell.value, 2500.0)
+        # Font is forced to Times New Roman 9, but bold carries over.
+        self.assertEqual(cell.font.name, "Times New Roman")
+        self.assertEqual(cell.font.size, 9)
+        self.assertTrue(cell.font.bold)
+        # Alignment + number format survive untouched.
+        self.assertEqual(cell.alignment.horizontal, "right")
+        self.assertEqual(cell.number_format, "#,##0")
+
+    def test_font_forced_even_when_writing_text_identifier(self):
+        """Text-format (identifier) cells are still stamped TNR 9."""
+        csv_path = os.path.join(self.tmpdir, "data.csv")
+        excel_path = os.path.join(self.tmpdir, "template.xlsx")
+        output_path = os.path.join(self.tmpdir, "output.xlsx")
+
+        _make_csv(csv_path, ["Ref", "PartCode"],
+                  [["A001", "000461200000102"]])
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Ref", "PartCode"])
+        ws.append(["A001", None])
+        target = ws.cell(row=2, column=2)
+        target.font = Font(name="Arial", size=12, italic=True)
+        target.alignment = Alignment(horizontal="center")
+        wb.save(excel_path)
+
+        process_insert(
+            csv_path, excel_path,
+            csv_cols=["PartCode"], excel_cols=["PartCode"],
+            output_path=output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb.active
+        cell = ws.cell(row=2, column=2)
+        self.assertEqual(cell.value, "000461200000102")
+        self.assertEqual(cell.number_format, "@")
+        # Font family + size are forced; italic decoration survives.
+        self.assertEqual(cell.font.name, "Times New Roman")
+        self.assertEqual(cell.font.size, 9)
+        self.assertTrue(cell.font.italic)
+        self.assertEqual(cell.alignment.horizontal, "center")
 
 
 if __name__ == "__main__":

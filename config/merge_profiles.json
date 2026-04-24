@@ -29,6 +29,8 @@
         "converter": "Millarco",
         "excel_template": "",
         "pdf_cols": "Quantity",
-        "excel_cols": "\u6570\u91cf"
+        "excel_cols": "\u6570\u91cf",
+        "qty_increase": "5%",
+        "qty_decrease": "5%"
     }
 ]
